@@ -24,9 +24,9 @@ void printBucket(Bucket bucket);
 // Função para liberar memória alocada
 void freeAll(Bucket *buckets, int numBuckets);
 // Função para combinar dois buckets
-void combineBuckets(Bucket b1, Bucket b2, Bucket *result);
+//void combineBuckets(Bucket b1, Bucket b2, Bucket *result);
 //Função para criar um novo bucket de ordem l realizando todas as combinações possíveis entre todos os buckets de ordem n + m = l
-void createCombinedBucket(Bucket *buckets, int numBuckets, int targetOrder);
+//void createCombinedBucket(Bucket *buckets, int numBuckets, int targetOrder);
 //Função para precedência de operadores
 int getPrecedence(char op);
 //Função para verificar se é operador
@@ -35,6 +35,13 @@ bool isOperator(char c);
 DdNode* evaluatePostfix(DdManager *manager, char **postfix, int count, VarMap *varMap, int varCount); 
 //Analisa a expressão infixada de entrada, converte para pós-fixada, e retorna o BDD resultante
 DdNode* parseInputExpression(DdManager *manager, const char *input, VarMap **outVarMap, int *outVarCount);
+//Gera o bucket 1 com base no varMap retornado por parseInputExpression
+DdNode* initializeFirstBucket(DdManager *manager, VarMap *varMap, int varCount, Bucket *bucket);
+//Combina dois BDDs com AND, OR ou NOT
+DdNode* combineBdds(DdManager *manager, DdNode *bdd1, DdNode *bdd2, char operator);
+//Função para criar um novo bucket de ordem l realizando todas as combinações possíveis entre todos os buckets de ordem n + m = l
+void createCombinedBucket(DdManager *manager, Bucket *buckets, int numBuckets, int targetOrder);
+
 
 
 int main(int argc, char *argv[]) {
@@ -50,7 +57,7 @@ int main(int argc, char *argv[]) {
 
     VarMap *varMap = NULL;
     int varCount = 0;
-
+    Bucket *buckets = NULL;
     // Parseia a expressão de entrada e obtém o BDD resultante
     DdNode *objectiveExp = parseInputExpression(manager, argv[1], &varMap, &varCount);
     if (objectiveExp == NULL) {
@@ -138,7 +145,7 @@ int main(int argc, char *argv[]) {
     result->functions[total_functions] = NULL; // Termina a lista
 }
 
-
+*/
 Bucket* addBucket(Bucket *buckets, int *numBuckets) {
     (*numBuckets)++;
     buckets = (Bucket *)realloc(buckets, (*numBuckets) * sizeof(Bucket));
@@ -150,6 +157,7 @@ Bucket* addBucket(Bucket *buckets, int *numBuckets) {
     buckets[(*numBuckets) - 1].functions = NULL;
     return buckets;
 }
+/*
 void printBucket(Bucket bucket) {
     printf("Bucket Order: %d\n", bucket.order);
     if (bucket.functions != NULL) {
@@ -337,4 +345,47 @@ DdNode* parseInputExpression(DdManager *manager, const char *input, VarMap **out
     }
     
     return finalBdd;
+}
+
+DdNode* initializeFirstBucket(DdManager *manager, VarMap *varMap, int varCount, Bucket *bucket){
+    bucket->order = 1;
+    bucket->size = varCount*2; //Leva em conta o literal e seu complemento
+    bucket->functions = (DdNode **)malloc((bucket->size + 1) * sizeof(DdNode *));
+    if (bucket->functions == NULL) {
+        fprintf(stderr, "Erro ao alocar memória para funções do bucket.\n");
+        exit(EXIT_FAILURE); 
+    }
+    for (int i = 0; i < varCount; i++) {
+        bucket->functions[i] = varMap[i].bdd;
+        Cudd_Ref(varMap[i].bdd); // Referencia o BDD ao colocá-lo no bucket
+        bucket->functions[i + varCount] = Cudd_Not(varMap[i].bdd);
+        Cudd_Ref(bucket->functions[i + varCount]); // Referencia o BDD ao colocá-lo no bucket
+    }
+    bucket->functions[bucket->size] = NULL; // Termina a lista
+    return NULL;
+}
+
+DdNode* combineBdds(DdManager *manager, DdNode *bdd1, DdNode *bdd2, char operator){
+    DdNode *result = NULL;
+    if (operator == '*') {
+        result = Cudd_bddAnd(manager, bdd1, bdd2);
+    } else if (operator == '+') {
+        result = Cudd_bddOr(manager, bdd1, bdd2);
+    } else if (operator == '!'){
+        result = Cudd_Not(bdd1);
+    }else {
+        fprintf(stderr, "Operador desconhecido: %c\n", operator);
+        return NULL;
+    }
+    Cudd_Ref(result); // Referencia o BDD resultante
+    return result;
+}
+
+void createCombinedBucket(DdManager *manager, Bucket *buckets, int numBuckets, int targetOrder){
+    for(int i = numBuckets; i < targetOrder; i++){    
+        buckets = addBucket(buckets, &numBuckets);
+        createCombinedBucket(manager, buckets, numBuckets, i);
+    }
+
+    
 }
