@@ -3,14 +3,17 @@
 #include <stdbool.h>
 #include <string.h>
 #include <cudd.h>
+#include <st.h>
 
-typedef struct {
+typedef struct
+{
     DdNode **functions;
     int order;
     int size;
 } Bucket;
 
-typedef struct {
+typedef struct
+{
     char name;
     DdNode *bdd;
 } VarMap;
@@ -18,49 +21,52 @@ typedef struct {
 // Protótipos para funções úteis
 
 // Função para adicionar um novo bucket
-Bucket* addBucket(Bucket *buckets, int *numBuckets);
+Bucket *addBucket(Bucket *buckets, int *numBuckets);
 // Imprimir o bucket para fins de debug
-void printBucket(Bucket bucket);
+void printBucket(DdManager *manager, Bucket bucket, int varCount);
 // Função para liberar memória alocada
-void freeAll(Bucket *buckets, int numBuckets);
+// void freeAll(Bucket *buckets, int numBuckets);
+void freeAllBdds(DdManager *manager, Bucket *buckets, int numBuckets);
 // Função para combinar dois buckets
-//void combineBuckets(Bucket b1, Bucket b2, Bucket *result);
-//Função para criar um novo bucket de ordem l realizando todas as combinações possíveis entre todos os buckets de ordem n + m = l
-//void createCombinedBucket(Bucket *buckets, int numBuckets, int targetOrder);
-//Função para precedência de operadores
+// void combineBuckets(Bucket b1, Bucket b2, Bucket *result);
+// Função para criar um novo bucket de ordem l realizando todas as combinações possíveis entre todos os buckets de ordem n + m = l
+// void createCombinedBucket(Bucket *buckets, int numBuckets, int targetOrder);
+// Função para precedência de operadores
 int getPrecedence(char op);
-//Função para verificar se é operador
+// Função para verificar se é operador
 bool isOperator(char c);
-//Avalia uma expressão em pós-fixada usando BDDs
-DdNode* evaluatePostfix(DdManager *manager, char **postfix, int count, VarMap *varMap, int varCount); 
-//Analisa a expressão infixada de entrada, converte para pós-fixada, e retorna o BDD resultante
-DdNode* parseInputExpression(DdManager *manager, const char *input, VarMap **outVarMap, int *outVarCount);
-//Gera o bucket 1 com base no varMap retornado por parseInputExpression
-DdNode* initializeFirstBucket(DdManager *manager, VarMap *varMap, int varCount, Bucket *bucket);
-//Combina dois BDDs com AND, OR ou NOT
-DdNode* combineBdds(DdManager *manager, DdNode *bdd1, DdNode *bdd2, char operator);
-//Função para criar um novo bucket de ordem l realizando todas as combinações possíveis entre todos os buckets de ordem n + m = l
+// Avalia uma expressão em pós-fixada usando BDDs
+DdNode *evaluatePostfix(DdManager *manager, char **postfix, int count, VarMap *varMap, int varCount);
+// Analisa a expressão infixada de entrada, converte para pós-fixada, e retorna o BDD resultante
+DdNode *parseInputExpression(DdManager *manager, const char *input, VarMap **outVarMap, int *outVarCount);
+// Gera o bucket 1 com base no varMap retornado por parseInputExpression
+DdNode *initializeFirstBucket(DdManager *manager, VarMap *varMap, int varCount, Bucket *bucket);
+// Combina dois BDDs com AND, OR ou NOT
+DdNode *combineBdds(DdManager *manager, DdNode *bdd1, DdNode *bdd2, char operator);
+// Função para criar um novo bucket de ordem l realizando todas as combinações possíveis entre todos os buckets de ordem n + m = l
 void createCombinedBucket(DdManager *manager, Bucket *buckets, int numBuckets, int targetOrder);
 
-
-
-int main(int argc, char *argv[]) {
-    if (argc < 2) {
+int main(int argc, char *argv[])
+{
+    if (argc < 2)
+    {
         fprintf(stderr, "Uso: %s <expressão>\n", argv[0]);
         return EXIT_FAILURE;
     }
-    DdManager *manager = Cudd_Init(0,0,CUDD_UNIQUE_SLOTS,CUDD_CACHE_SLOTS,0);
-        if (manager == NULL) {
+    DdManager *manager = Cudd_Init(0, 0, CUDD_UNIQUE_SLOTS, CUDD_CACHE_SLOTS, 0);
+    if (manager == NULL)
+    {
         fprintf(stderr, "Erro ao inicializar o CUDD.\n");
         return EXIT_FAILURE;
     }
-
+    int numBuckets = 0;
     VarMap *varMap = NULL;
     int varCount = 0;
     Bucket *buckets = NULL;
     // Parseia a expressão de entrada e obtém o BDD resultante
     DdNode *objectiveExp = parseInputExpression(manager, argv[1], &varMap, &varCount);
-    if (objectiveExp == NULL) {
+    if (objectiveExp == NULL)
+    {
         fprintf(stderr, "Erro ao parsear a expressão.\n");
         Cudd_Quit(manager);
         return EXIT_FAILURE;
@@ -68,6 +74,25 @@ int main(int argc, char *argv[]) {
     Cudd_Ref(objectiveExp); // Referencia o BDD resultante
     Cudd_PrintDebug(manager, objectiveExp, varCount, 2);
 
+    // Inicializa o bucket 1
+    buckets = addBucket(buckets, &numBuckets);
+    initializeFirstBucket(manager, varMap, varCount, &buckets[0]);
+
+    printf("--- Bucket 1 (Ordem %d, Tamanho %d) ---\n", buckets[0].order, buckets[0].size);
+    printBucket(manager, buckets[0], varCount);
+
+    // Inicializa todos os buckets que poderão ser usados nesta execução do programa
+    while (numBuckets < varCount)
+    {
+        buckets = addBucket(buckets, &numBuckets);
+    }
+
+    for (int order = 2; order <= varCount; order++)
+    {
+        createCombinedBucket(manager, buckets, numBuckets, order);
+        printf("--- Bucket %d (Ordem %d, Tamanho %d) ---\n", order, buckets[order - 1].order, buckets[order - 1].size);
+        printBucket(manager, buckets[order - 1], varCount);
+    }
 
     /*
     int numBuckets = 1; // começa com um bucket, de ordem 1
@@ -88,7 +113,7 @@ int main(int argc, char *argv[]) {
         printBucket(buckets[0]);
 
     buckets = addBucket(buckets, &numBuckets);
-    
+
     // Cria um novo bucket combinando o de ordem 1 com ele mesmo
     combineBuckets(buckets[0], buckets[0], &buckets[1]);
 
@@ -99,6 +124,9 @@ int main(int argc, char *argv[]) {
     createCombinedBucket(buckets, numBuckets, 4);
     printBucket(buckets[3]);
     freeAll(buckets, numBuckets);*/
+    Cudd_RecursiveDeref(manager, objectiveExp);
+    freeAllBdds(manager, buckets, numBuckets);
+    free(varMap);
     Cudd_Quit(manager);
     return 0;
 }
@@ -122,7 +150,7 @@ int main(int argc, char *argv[]) {
             char *func2 = b2.functions[j];
             int len1 = strlen(func1);
             int len2 = strlen(func2);
-            
+
             // Aloca memória para as novas strings (+ e *)
             char *plus_combination = (char *)malloc(len1 + len2 + 2);
             char *mult_combination = (char *)malloc(len1 + len2 + 2);
@@ -146,15 +174,18 @@ int main(int argc, char *argv[]) {
 }
 
 */
-Bucket* addBucket(Bucket *buckets, int *numBuckets) {
+Bucket *addBucket(Bucket *buckets, int *numBuckets)
+{
     (*numBuckets)++;
     buckets = (Bucket *)realloc(buckets, (*numBuckets) * sizeof(Bucket));
-    if (buckets == NULL) {
+    if (buckets == NULL)
+    {
         fprintf(stderr, "Erro ao realocar memória para buckets.\n");
         exit(EXIT_FAILURE);
     }
-    buckets[(*numBuckets) - 1].order = (*numBuckets) - 1;
+    buckets[(*numBuckets) - 1].order = 0;
     buckets[(*numBuckets) - 1].functions = NULL;
+    buckets[(*numBuckets) - 1].size = 0;
     return buckets;
 }
 /*
@@ -169,7 +200,25 @@ void printBucket(Bucket bucket) {
     }
 }
 */
-void freeAll(Bucket *buckets, int numBuckets){
+
+void printBucket(DdManager *manager, Bucket bucket, int varCount)
+{
+    printf("Bucket Order: %d | Size: %d\n", bucket.order, bucket.size);
+    if (bucket.functions != NULL)
+    {
+        for (int i = 0; i < bucket.size; i++)
+        {
+            printf("  Function[%d]:\n", i);
+            Cudd_PrintDebug(manager, bucket.functions[i], varCount, 2);
+        }
+    }
+    else
+    {
+        printf("  No functions in this bucket.\n");
+    }
+}
+
+/*void freeAll(Bucket *buckets, int numBuckets){
     for (int i = 0; i < numBuckets; i++) {
         if (buckets[i].functions != NULL) {
             for (int j = 0; buckets[i].functions[j] != NULL; j++) {
@@ -179,10 +228,31 @@ void freeAll(Bucket *buckets, int numBuckets){
         }
     }
     free(buckets);
+}*/
+void freeAllBdds(DdManager *manager, Bucket *buckets, int numBuckets)
+{
+    if (buckets == NULL)
+        return;
+    for (int i = 0; i < numBuckets; i++)
+    {
+        if (buckets[i].functions != NULL)
+        {
+            // Dereferencia todos os BDDs no bucket
+            for (int j = 0; j < buckets[i].size; j++)
+            {
+                if (buckets[i].functions[j] != NULL)
+                {
+                    Cudd_RecursiveDeref(manager, buckets[i].functions[j]);
+                }
+            }
+            free(buckets[i].functions); // Libera o array de ponteiros
+        }
+    }
+    free(buckets); // Libera o array de buckets
 }
 /*
 void createCombinedBucket(Bucket *buckets, int numBuckets, int targetOrder){
-    for(int i = numBuckets; i < targetOrder; i++){    
+    for(int i = numBuckets; i < targetOrder; i++){
         buckets = addBucket(buckets, &numBuckets);
         createCombinedBucket(buckets, numBuckets, i);
     }
@@ -196,43 +266,60 @@ void createCombinedBucket(Bucket *buckets, int numBuckets, int targetOrder){
     }
 }
 */
-int getPrecedence(char op) {
-    switch (op) {
-        case '!': return 3; // Negação (unário)
-        case '*': return 2; // AND
-        case '+': return 1; // OR
-        default:  return 0;
+int getPrecedence(char op)
+{
+    switch (op)
+    {
+    case '!':
+        return 3; // Negação (unário)
+    case '*':
+        return 2; // AND
+    case '+':
+        return 1; // OR
+    default:
+        return 0;
     }
 }
 
-bool isOperator(char c) {
+bool isOperator(char c)
+{
 
     return c == '+' || c == '*' || c == '!';
 }
 
-DdNode* evaluatePostfix(DdManager *manager, char **postfix, int count, VarMap *varMap, int varCount){
+DdNode *evaluatePostfix(DdManager *manager, char **postfix, int count, VarMap *varMap, int varCount)
+{
     DdNode *pilha[256]; // Pilha para avaliação
-    int top = -1; // Índice do topo da pilha
+    int top = -1;       // Índice do topo da pilha
     DdNode *result = NULL;
 
-    for (int i = 0; i < count; i++) {
+    for (int i = 0; i < count; i++)
+    {
         char *token = postfix[i];
-        if (token[0] >= 'A' && token[0] <= 'Z' && token[1] == '\0') {
+        if (token[0] >= 'A' && token[0] <= 'Z' && token[1] == '\0')
+        {
             // Se for uma variável, descobre se já existe no varMap
             DdNode *varBdd = NULL;
-            for (int j = 0; j < varCount; j++) {
-                if (varMap[j].name == token[0]) {
+            for (int j = 0; j < varCount; j++)
+            {
+                if (varMap[j].name == token[0])
+                {
                     varBdd = varMap[j].bdd;
                     break;
                 }
             }
-            if (varBdd) {
+            if (varBdd)
+            {
                 pilha[++top] = varBdd;
                 Cudd_Ref(varBdd); // Referencia o BDD ao colocá-lo na pilha
             }
-        } else if (isOperator(token[0]) && token[1] == '\0'){ 
-            if (token[0] == '!') { //Se for NOT, realiza a operação, consome e reempilha o resultado
-                if (top < 0) {
+        }
+        else if (isOperator(token[0]) && token[1] == '\0')
+        {
+            if (token[0] == '!')
+            { // Se for NOT, realiza a operação, consome e reempilha o resultado
+                if (top < 0)
+                {
                     fprintf(stderr, "Erro: Pilha vazia para operador '!'\n");
                     return NULL;
                 }
@@ -241,25 +328,30 @@ DdNode* evaluatePostfix(DdManager *manager, char **postfix, int count, VarMap *v
                 Cudd_Ref(result);
                 Cudd_RecursiveDeref(manager, operand);
                 pilha[++top] = result;
-
-            } else if (token[0] == '*' || token[0] == '+') { //Se for AND ou OR, realiza a operação, consome os operandos e reempilha o resultado
-                if (top < 1) {
+            }
+            else if (token[0] == '*' || token[0] == '+')
+            { // Se for AND ou OR, realiza a operação, consome os operandos e reempilha o resultado
+                if (top < 1)
+                {
                     fprintf(stderr, "Erro: Pilha com operandos insuficientes para operador '%c'\n", token[0]);
                     return NULL;
                 }
                 DdNode *op1 = pilha[top--];
                 DdNode *op2 = pilha[top--];
                 DdNode *result;
-                if (token[0] == '*') {
+                if (token[0] == '*')
+                {
                     result = Cudd_bddAnd(manager, op2, op1);
-                } else { // token[0] == '+'
+                }
+                else
+                { // token[0] == '+'
                     result = Cudd_bddOr(manager, op2, op1);
-            }
+                }
                 Cudd_Ref(result);
                 Cudd_RecursiveDeref(manager, op2);
                 Cudd_RecursiveDeref(manager, op1);
                 pilha[++top] = result;
-        }
+            }
         }
     }
     DdNode *finalBdd = pilha[top--];
@@ -267,95 +359,119 @@ DdNode* evaluatePostfix(DdManager *manager, char **postfix, int count, VarMap *v
     return finalBdd;
 }
 
-DdNode* parseInputExpression(DdManager *manager, const char *input, VarMap **outVarMap, int *outVarCount){
+DdNode *parseInputExpression(DdManager *manager, const char *input, VarMap **outVarMap, int *outVarCount)
+{
     char *postfix[256]; // Para montar a expressão em pós-fixada
     int postfix_count = 0;
-    
+
     char op_stack[256]; // Pilha de operadores
     int op_top = -1;
 
     VarMap local_var_map[52];
     int var_count = 0;
-    
-    //Tokenização e Shunting-yard
-    for (int i = 0; input[i] != '\0'; i++) {
+
+    // Tokenização e Shunting-yard
+    for (int i = 0; input[i] != '\0'; i++)
+    {
         char c = input[i];
 
-        //Normaliza o caracter caso seja minúsculo
-        if (c >= 'a' && c <= 'z') {
+        // Normaliza o caracter caso seja minúsculo
+        if (c >= 'a' && c <= 'z')
+        {
             c = c - ('a' - 'A');
         }
 
-        if (c == ' ') continue; // Ignora espaços
+        if (c == ' ')
+            continue; // Ignora espaços
 
-        if (c >= 'A' && c <= 'Z') { // Se é uma variável
+        if (c >= 'A' && c <= 'Z')
+        { // Se é uma variável
             // Adiciona a variável ao nosso mapa se for nova
             bool found = false;
-            for(int j=0; j<var_count; j++) {
-                if(local_var_map[j].name == c) found = true;
+            for (int j = 0; j < var_count; j++)
+            {
+                if (local_var_map[j].name == c)
+                    found = true;
             }
-            if (!found) {
+            if (!found)
+            {
                 local_var_map[var_count].name = c;
                 local_var_map[var_count].bdd = Cudd_bddIthVar(manager, var_count);
                 printf("Criada variável BDD %d para '%c'\n", var_count, c);
                 var_count++;
             }
-            
+
             // Adiciona à fila de saída
             char *var_token = malloc(2);
-            var_token[0] = c; var_token[1] = '\0';
+            var_token[0] = c;
+            var_token[1] = '\0';
             postfix[postfix_count++] = var_token;
-
-        } else if (isOperator(c)) { // Se é um operador
-            while (op_top > -1 && getPrecedence(op_stack[op_top]) >= getPrecedence(c)) {
+        }
+        else if (isOperator(c))
+        { // Se é um operador
+            while (op_top > -1 && getPrecedence(op_stack[op_top]) >= getPrecedence(c))
+            {
                 char *op_token = malloc(2);
-                op_token[0] = op_stack[op_top--]; op_token[1] = '\0';
+                op_token[0] = op_stack[op_top--];
+                op_token[1] = '\0';
                 postfix[postfix_count++] = op_token;
             }
             op_stack[++op_top] = c;
-        } else if (c == '(') {
+        }
+        else if (c == '(')
+        {
             op_stack[++op_top] = c;
-        } else if (c == ')') {
-            while (op_top > -1 && op_stack[op_top] != '(') {
+        }
+        else if (c == ')')
+        {
+            while (op_top > -1 && op_stack[op_top] != '(')
+            {
                 char *op_token = malloc(2);
-                op_token[0] = op_stack[op_top--]; op_token[1] = '\0';
+                op_token[0] = op_stack[op_top--];
+                op_token[1] = '\0';
                 postfix[postfix_count++] = op_token;
             }
             op_top--; // Descarta o '('
         }
     }
 
-    //Pop dos operadores restantes da pilha
-    while (op_top > -1) {
+    // Pop dos operadores restantes da pilha
+    while (op_top > -1)
+    {
         char *op_token = malloc(2);
-        op_token[0] = op_stack[op_top--]; op_token[1] = '\0';
+        op_token[0] = op_stack[op_top--];
+        op_token[1] = '\0';
         postfix[postfix_count++] = op_token;
     }
 
-    //Avalia a expressão
+    // Avalia a expressão
     *outVarMap = malloc(var_count * sizeof(VarMap));
     memcpy(*outVarMap, local_var_map, var_count * sizeof(VarMap));
     *outVarCount = var_count;
 
-    DdNode* finalBdd = evaluatePostfix(manager, postfix, postfix_count, *outVarMap, var_count);
+    DdNode *finalBdd = evaluatePostfix(manager, postfix, postfix_count, *outVarMap, var_count);
 
-    //Limpa a memória dos tokens
-    for (int i = 0; i < postfix_count; i++) {
+    // Limpa a memória dos tokens
+    for (int i = 0; i < postfix_count; i++)
+    {
         free(postfix[i]);
     }
-    
+
     return finalBdd;
 }
 
-DdNode* initializeFirstBucket(DdManager *manager, VarMap *varMap, int varCount, Bucket *bucket){
+DdNode *initializeFirstBucket(DdManager *manager, VarMap *varMap, int varCount, Bucket *bucket)
+{
     bucket->order = 1;
-    bucket->size = varCount*2; //Leva em conta o literal e seu complemento
+    bucket->size = varCount * 2; // Leva em conta o literal e seu complemento
     bucket->functions = (DdNode **)malloc((bucket->size + 1) * sizeof(DdNode *));
-    if (bucket->functions == NULL) {
+    if (bucket->functions == NULL)
+    {
         fprintf(stderr, "Erro ao alocar memória para funções do bucket.\n");
-        exit(EXIT_FAILURE); 
+        exit(EXIT_FAILURE);
     }
-    for (int i = 0; i < varCount; i++) {
+    for (int i = 0; i < varCount; i++)
+    {
         bucket->functions[i] = varMap[i].bdd;
         Cudd_Ref(varMap[i].bdd); // Referencia o BDD ao colocá-lo no bucket
         bucket->functions[i + varCount] = Cudd_Not(varMap[i].bdd);
@@ -365,15 +481,23 @@ DdNode* initializeFirstBucket(DdManager *manager, VarMap *varMap, int varCount, 
     return NULL;
 }
 
-DdNode* combineBdds(DdManager *manager, DdNode *bdd1, DdNode *bdd2, char operator){
+DdNode *combineBdds(DdManager *manager, DdNode *bdd1, DdNode *bdd2, char operator)
+{
     DdNode *result = NULL;
-    if (operator == '*') {
+    if (operator == '*')
+    {
         result = Cudd_bddAnd(manager, bdd1, bdd2);
-    } else if (operator == '+') {
+    }
+    else if (operator == '+')
+    {
         result = Cudd_bddOr(manager, bdd1, bdd2);
-    } else if (operator == '!'){
+    }
+    else if (operator == '!')
+    {
         result = Cudd_Not(bdd1);
-    }else {
+    }
+    else
+    {
         fprintf(stderr, "Operador desconhecido: %c\n", operator);
         return NULL;
     }
@@ -381,11 +505,111 @@ DdNode* combineBdds(DdManager *manager, DdNode *bdd1, DdNode *bdd2, char operato
     return result;
 }
 
-void createCombinedBucket(DdManager *manager, Bucket *buckets, int numBuckets, int targetOrder){
-    for(int i = numBuckets; i < targetOrder; i++){    
-        buckets = addBucket(buckets, &numBuckets);
-        createCombinedBucket(manager, buckets, numBuckets, i);
+// Função para realizar o realloc quando necessário
+void addBddToDynamicArray(DdNode *bdd, DdNode ***array, int *count, int *capacity)
+{
+    if (*count == *capacity)
+    {
+        // Dobra a capacidade (ou inicializa se for 0)
+        *capacity = (*capacity == 0) ? 256 : (*capacity) * 2;
+        *array = (DdNode **)realloc(*array, (*capacity) * sizeof(DdNode *));
+        if (*array == NULL)
+        {
+            fprintf(stderr, "Erro ao realocar array dinâmico de BDDs\n");
+            exit(EXIT_FAILURE);
+        }
+    }
+    (*array)[*count] = bdd;
+    (*count)++;
+}
+
+void createCombinedBucket(DdManager *manager, Bucket *buckets, int numBuckets, int targetOrder)
+{
+    Bucket *targetBucket = &buckets[targetOrder - 1];
+
+    // Tabela hash para cada bucket, para garantir que não tenha combinações repetidas
+    st_table *uniqueCheck = st_init_table(st_ptrcmp, st_ptrhash);
+    if (uniqueCheck == NULL)
+    {
+        fprintf(stderr, "Erro ao criar tabela hash ST\n");
+        exit(EXIT_FAILURE);
     }
 
-    
+    DdNode **newBdds = NULL;
+    int newBddCount = 0;
+    int newBddCapacity = 0;
+
+    for (int i = 0; i < numBuckets; i++)
+    {
+        for (int j = i; j < numBuckets; j++)
+        {
+            if (buckets[i].order + buckets[j].order == targetOrder)
+            {
+
+                Bucket *b1 = &buckets[i];
+                Bucket *b2 = &buckets[j];
+
+                // "combineBuckets" foi integrada aqui, pra facilitar o controle de duplicatas
+                for (int k = 0; k < b1->size; k++)
+                {
+                    for (int l = 0; l < b2->size; l++)
+                    {
+                        DdNode *bdd1 = b1->functions[k];
+                        DdNode *bdd2 = b2->functions[l];
+
+                        // Gera as duas combinações (AND, OR)
+                        DdNode *combinations[2];
+                        combinations[0] = Cudd_bddAnd(manager, bdd1, bdd2);
+                        combinations[1] = Cudd_bddOr(manager, bdd1, bdd2);
+
+                        for (int op = 0; op < 2; op++)
+                        {
+                            DdNode *newBdd = combinations[op];
+                            Cudd_Ref(newBdd); // Referencia o resultado da operação CUDD
+
+                            // Filtra na Hash
+                            if (st_lookup(uniqueCheck, (char *)newBdd, NULL) == 0 && newBdd != Cudd_ReadLogicZero(manager))
+                            {
+                                // BDD é novo, insere na tabela hash
+                                st_insert(uniqueCheck, (char *)newBdd, (char *)newBdd);
+
+                                // Adiciona ao array final
+                                addBddToDynamicArray(newBdd, &newBdds, &newBddCount, &newBddCapacity);
+                            }
+                            else
+                            {
+                                // Caso seja repetida, remove a referência e descarta
+                                Cudd_RecursiveDeref(manager, newBdd);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Após o uso, libera a hash
+    st_free_table(uniqueCheck);
+
+    // Atribui a lista final de BDDs únicos ao bucket alvo
+    targetBucket->order = targetOrder;
+    targetBucket->size = newBddCount;
+
+    //Não sei se é necessário, mas reduz o tamanho do array para economizar memória
+    if (newBddCount > 0 && newBddCount < newBddCapacity)
+    {
+        DdNode **trimmedBdds = (DdNode **)realloc(newBdds, newBddCount * sizeof(DdNode *));
+        if (trimmedBdds != NULL)
+        {
+            targetBucket->functions = trimmedBdds;
+        }
+        else
+        {
+            targetBucket->functions = newBdds; // realloc falhou, mas newBdds ainda é válido
+        }
+    }
+    else
+    {
+        targetBucket->functions = newBdds;
+    }
 }
