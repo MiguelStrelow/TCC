@@ -7,7 +7,13 @@
 
 typedef struct
 {
-    DdNode **functions;
+    DdNode *bdd;
+    char *implementation;
+} Function;
+
+typedef struct
+{
+    Function **functions;
     int order;
     int size;
 } Bucket;
@@ -18,6 +24,9 @@ typedef struct
     DdNode *bdd;
 } VarMap;
 
+
+
+
 // Protótipos para funções úteis
 
 // Função para adicionar um novo bucket
@@ -26,7 +35,7 @@ Bucket *addBucket(Bucket *buckets, int *numBuckets);
 void printBucket(DdManager *manager, Bucket bucket, int varCount);
 // Função para liberar memória alocada
 // void freeAll(Bucket *buckets, int numBuckets);
-void freeAllBdds(DdManager *manager, Bucket *buckets, int numBuckets);
+void freeAllBuckets(DdManager *manager, Bucket *buckets, int numBuckets);
 // Função para combinar dois buckets
 // void combineBuckets(Bucket b1, Bucket b2, Bucket *result);
 // Função para criar um novo bucket de ordem l realizando todas as combinações possíveis entre todos os buckets de ordem n + m = l
@@ -40,11 +49,11 @@ DdNode *evaluatePostfix(DdManager *manager, char **postfix, int count, VarMap *v
 // Analisa a expressão infixada de entrada, converte para pós-fixada, e retorna o BDD resultante
 DdNode *parseInputExpression(DdManager *manager, const char *input, VarMap **outVarMap, int *outVarCount);
 // Gera o bucket 1 com base no varMap retornado por parseInputExpression
-DdNode *initializeFirstBucket(DdManager *manager, VarMap *varMap, int varCount, Bucket *bucket);
+DdNode *initializeFirstBucket(DdManager *manager, VarMap *varMap, int varCount, Bucket *bucket, DdNode *objectiveExp);
 // Combina dois BDDs com AND, OR ou NOT
 DdNode *combineBdds(DdManager *manager, DdNode *bdd1, DdNode *bdd2, char operator);
 // Função para criar um novo bucket de ordem l realizando todas as combinações possíveis entre todos os buckets de ordem n + m = l
-void createCombinedBucket(DdManager *manager, Bucket *buckets, int numBuckets, int targetOrder);
+void createCombinedBucket(DdManager *manager, Bucket *buckets, int numBuckets, int targetOrder, DdNode *objectiveExp);
 
 int main(int argc, char *argv[])
 {
@@ -71,12 +80,11 @@ int main(int argc, char *argv[])
         Cudd_Quit(manager);
         return EXIT_FAILURE;
     }
-    Cudd_Ref(objectiveExp); // Referencia o BDD resultante
     Cudd_PrintDebug(manager, objectiveExp, varCount, 2);
 
     // Inicializa o bucket 1
     buckets = addBucket(buckets, &numBuckets);
-    initializeFirstBucket(manager, varMap, varCount, &buckets[0]);
+    initializeFirstBucket(manager, varMap, varCount, &buckets[0], objectiveExp);
 
     printf("--- Bucket 1 (Ordem %d, Tamanho %d) ---\n", buckets[0].order, buckets[0].size);
     printBucket(manager, buckets[0], varCount);
@@ -89,7 +97,7 @@ int main(int argc, char *argv[])
 
     for (int order = 2; order <= varCount; order++)
     {
-        createCombinedBucket(manager, buckets, numBuckets, order);
+        createCombinedBucket(manager, buckets, numBuckets, order, objectiveExp);
         printf("--- Bucket %d (Ordem %d, Tamanho %d) ---\n", order, buckets[order - 1].order, buckets[order - 1].size);
         printBucket(manager, buckets[order - 1], varCount);
     }
@@ -125,7 +133,7 @@ int main(int argc, char *argv[])
     printBucket(buckets[3]);
     freeAll(buckets, numBuckets);*/
     Cudd_RecursiveDeref(manager, objectiveExp);
-    freeAllBdds(manager, buckets, numBuckets);
+    freeAllBuckets(manager, buckets, numBuckets);
     free(varMap);
     Cudd_Quit(manager);
     return 0;
@@ -208,8 +216,8 @@ void printBucket(DdManager *manager, Bucket bucket, int varCount)
     {
         for (int i = 0; i < bucket.size; i++)
         {
-            printf("  Function[%d]:\n", i);
-            Cudd_PrintDebug(manager, bucket.functions[i], varCount, 2);
+            printf("  Function[%d]: %s\n", i, bucket.functions[i]->implementation);
+            //Cudd_PrintDebug(manager, bucket.functions[i], varCount, 2);
         }
     }
     else
@@ -229,7 +237,7 @@ void printBucket(DdManager *manager, Bucket bucket, int varCount)
     }
     free(buckets);
 }*/
-void freeAllBdds(DdManager *manager, Bucket *buckets, int numBuckets)
+void freeAllBuckets(DdManager *manager, Bucket *buckets, int numBuckets)
 {
     if (buckets == NULL)
         return;
@@ -237,12 +245,19 @@ void freeAllBdds(DdManager *manager, Bucket *buckets, int numBuckets)
     {
         if (buckets[i].functions != NULL)
         {
-            // Dereferencia todos os BDDs no bucket
+            // Dereferencia todas as funções no bucket
             for (int j = 0; j < buckets[i].size; j++)
             {
                 if (buckets[i].functions[j] != NULL)
                 {
-                    Cudd_RecursiveDeref(manager, buckets[i].functions[j]);
+                    //Deferecia o BDD
+                    Cudd_RecursiveDeref(manager, buckets[i].functions[j]->bdd);
+                    
+                    //Libera a implementação
+                    free(buckets[i].functions[j]->implementation);
+
+                    //Libera a struct
+                    free(buckets[i].functions[j]);
                 }
             }
             free(buckets[i].functions); // Libera o array de ponteiros
@@ -460,24 +475,57 @@ DdNode *parseInputExpression(DdManager *manager, const char *input, VarMap **out
     return finalBdd;
 }
 
-DdNode *initializeFirstBucket(DdManager *manager, VarMap *varMap, int varCount, Bucket *bucket)
+DdNode *initializeFirstBucket(DdManager *manager, VarMap *varMap, int varCount, Bucket *bucket, DdNode *objectiveExp)
 {
     bucket->order = 1;
     bucket->size = varCount * 2; // Leva em conta o literal e seu complemento
-    bucket->functions = (DdNode **)malloc((bucket->size + 1) * sizeof(DdNode *));
+    bucket->functions = (Function **)malloc((bucket->size + 1) * sizeof(Function *));
     if (bucket->functions == NULL)
     {
         fprintf(stderr, "Erro ao alocar memória para funções do bucket.\n");
         exit(EXIT_FAILURE);
     }
+
+    char varStr[2] = {'\0', '\0'};
+    char notStr[3] = {'!', '\0', '\0'};
     for (int i = 0; i < varCount; i++)
     {
-        bucket->functions[i] = varMap[i].bdd;
-        Cudd_Ref(varMap[i].bdd); // Referencia o BDD ao colocá-lo no bucket
-        bucket->functions[i + varCount] = Cudd_Not(varMap[i].bdd);
-        Cudd_Ref(bucket->functions[i + varCount]); // Referencia o BDD ao colocá-lo no bucket
+        bucket->functions[i] = (Function *)malloc(sizeof(Function));
+        if (bucket->functions[i] == NULL)
+        {
+            fprintf(stderr, "Erro ao alocar memória para função do bucket.\n");
+            exit(EXIT_FAILURE);
+        }
+        varStr[0] = varMap[i].name;
+        bucket->functions[i]->implementation = strdup(varStr);
+        bucket->functions[i]->bdd = varMap[i].bdd;
+        Cudd_Ref(bucket->functions[i]->bdd); // Referencia o BDD ao colocá-lo no bucket
+
+        bucket->functions[i + varCount] = (Function *)malloc(sizeof(Function));
+        if (bucket->functions[i + varCount] == NULL)
+        {
+            fprintf(stderr, "Erro ao alocar memória para função do bucket.\n");
+            exit(EXIT_FAILURE);
+        }
+
+        notStr[1] = varMap[i].name;
+        bucket->functions[i + varCount]->implementation = strdup(notStr);
+        bucket->functions[i + varCount]->bdd = Cudd_Not(varMap[i].bdd);
+        Cudd_Ref(bucket->functions[i + varCount]->bdd); // Referencia o BDD ao colocá-lo no bucket
+        //Verifica se algum dos BDDs é equivalente ao objetivo
+        if (bucket->functions[i]->bdd == objectiveExp) {
+            printf("Equivalência encontrada (Ordem 1):\n");
+            printf("Implementação: %s\n", bucket->functions[i]->implementation);
+            printf("No de literais: %d\n", bucket->order);
+            exit(0);
+        }
+        if (bucket->functions[i+varCount]->bdd == objectiveExp) {
+            printf("Equivalência encontrada (Ordem 1):\n");
+            printf("Implementação: %s\n", bucket->functions[i+varCount]->implementation);
+            printf("No de literais: %d\n", bucket->order);
+            exit(0);
+        }
     }
-    bucket->functions[bucket->size] = NULL; // Termina a lista
     return NULL;
 }
 
@@ -506,24 +554,24 @@ DdNode *combineBdds(DdManager *manager, DdNode *bdd1, DdNode *bdd2, char operato
 }
 
 // Função para realizar o realloc quando necessário
-void addBddToDynamicArray(DdNode *bdd, DdNode ***array, int *count, int *capacity)
+void addFunctionToDynamicArray(Function *func, Function ***array, int *count, int *capacity)
 {
     if (*count == *capacity)
     {
         // Dobra a capacidade (ou inicializa se for 0)
         *capacity = (*capacity == 0) ? 256 : (*capacity) * 2;
-        *array = (DdNode **)realloc(*array, (*capacity) * sizeof(DdNode *));
+        *array = (Function **)realloc(*array, (*capacity) * sizeof(Function *));
         if (*array == NULL)
         {
             fprintf(stderr, "Erro ao realocar array dinâmico de BDDs\n");
             exit(EXIT_FAILURE);
         }
     }
-    (*array)[*count] = bdd;
+    (*array)[*count] = func;
     (*count)++;
 }
 
-void createCombinedBucket(DdManager *manager, Bucket *buckets, int numBuckets, int targetOrder)
+void createCombinedBucket(DdManager *manager, Bucket *buckets, int numBuckets, int targetOrder, DdNode *objectiveExp)
 {
     Bucket *targetBucket = &buckets[targetOrder - 1];
 
@@ -535,9 +583,11 @@ void createCombinedBucket(DdManager *manager, Bucket *buckets, int numBuckets, i
         exit(EXIT_FAILURE);
     }
 
-    DdNode **newBdds = NULL;
-    int newBddCount = 0;
-    int newBddCapacity = 0;
+
+    Function **newFunctions = NULL;
+    int newFuncCount = 0;
+    int newFuncCapacity = 0;
+    char temps[256]; // Buffer temporário para implementações
 
     for (int i = 0; i < numBuckets; i++)
     {
@@ -554,27 +604,59 @@ void createCombinedBucket(DdManager *manager, Bucket *buckets, int numBuckets, i
                 {
                     for (int l = 0; l < b2->size; l++)
                     {
-                        DdNode *bdd1 = b1->functions[k];
-                        DdNode *bdd2 = b2->functions[l];
+                        Function *f1 = b1->functions[k];
+                        Function *f2 = b2->functions[l];
+                        DdNode *bdd1 = f1->bdd;
+                        DdNode *bdd2 = f2->bdd;
 
                         // Gera as duas combinações (AND, OR)
-                        DdNode *combinations[2];
-                        combinations[0] = Cudd_bddAnd(manager, bdd1, bdd2);
-                        combinations[1] = Cudd_bddOr(manager, bdd1, bdd2);
-
+                        DdNode *newBdd = NULL;
                         for (int op = 0; op < 2; op++)
                         {
-                            DdNode *newBdd = combinations[op];
-                            Cudd_Ref(newBdd); // Referencia o resultado da operação CUDD
+                            if (op == 0){
+                                // AND
+                                newBdd = combineBdds(manager, bdd1, bdd2, '*');
+                            } else {
+                                // OR
+                                newBdd = combineBdds(manager, bdd1, bdd2, '+');
+                            }
 
                             // Filtra na Hash
                             if (st_lookup(uniqueCheck, (char *)newBdd, NULL) == 0 && newBdd != Cudd_ReadLogicZero(manager))
                             {
+                                //Combina as implentações
+                                sprintf(temps, "(%s %c %s)", f1->implementation, (op == 0) ? '*' : '+', f2->implementation);
+
+                                Function *newFunction = (Function *)malloc(sizeof(Function));
+                                if (newFunction == NULL)
+                                {
+                                    fprintf(stderr, "Erro ao alocar memória para nova função\n");
+                                    exit(EXIT_FAILURE);
+                                }
+                                newFunction->bdd = newBdd;
+                                newFunction->implementation = strdup(temps);
+
+                                // Verifica se é o objetivo
+                                if (newBdd == objectiveExp) {
+                                    printf("Equivalência encontrada:\n");
+                                    //printa as informações
+                                    printf("Implementação: %s\n", newFunction->implementation);
+                                    printf("No de literais: %d\n", targetOrder);
+                                    //Libera a memória alocada
+                                    free(newFunction->implementation);
+                                    free(newFunction);
+
+                                    printf("Encerrando a execução.\n");
+                                    // Libera a hash antes de sair
+                                    st_free_table(uniqueCheck);
+                                    //Ainda é problemático sair aqui, mas vai ficar por enquanto
+                                    exit(0);
+                                }
                                 // BDD é novo, insere na tabela hash
                                 st_insert(uniqueCheck, (char *)newBdd, (char *)newBdd);
 
                                 // Adiciona ao array final
-                                addBddToDynamicArray(newBdd, &newBdds, &newBddCount, &newBddCapacity);
+                                addFunctionToDynamicArray(newFunction, &newFunctions, &newFuncCount, &newFuncCapacity);
                             }
                             else
                             {
@@ -593,23 +675,13 @@ void createCombinedBucket(DdManager *manager, Bucket *buckets, int numBuckets, i
 
     // Atribui a lista final de BDDs únicos ao bucket alvo
     targetBucket->order = targetOrder;
-    targetBucket->size = newBddCount;
+    targetBucket->size = newFuncCount;
 
     //Não sei se é necessário, mas reduz o tamanho do array para economizar memória
-    if (newBddCount > 0 && newBddCount < newBddCapacity)
+    if (newFuncCount > 0 && newFuncCount < newFuncCapacity)
     {
-        DdNode **trimmedBdds = (DdNode **)realloc(newBdds, newBddCount * sizeof(DdNode *));
-        if (trimmedBdds != NULL)
-        {
-            targetBucket->functions = trimmedBdds;
-        }
-        else
-        {
-            targetBucket->functions = newBdds; // realloc falhou, mas newBdds ainda é válido
-        }
-    }
-    else
-    {
-        targetBucket->functions = newBdds;
+        targetBucket->functions = (Function **)realloc(newFunctions, newFuncCount * sizeof(Function *));
+    } else {
+        targetBucket->functions = newFunctions;
     }
 }
