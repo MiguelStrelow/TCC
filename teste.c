@@ -18,14 +18,9 @@ typedef struct
     int size;
 } Bucket;
 
-typedef struct
-{
-    char name;
-    DdNode *bdd;
-} VarMap;
 
 
-
+//Adicionar apenas os literais no objetivo, remover as negações desnecessárias
 
 // Protótipos para funções úteis
 
@@ -45,15 +40,15 @@ int getPrecedence(char op);
 // Função para verificar se é operador
 bool isOperator(char c);
 // Avalia uma expressão em pós-fixada usando BDDs
-DdNode *evaluatePostfix(DdManager *manager, char **postfix, int count, VarMap *varMap, int varCount);
+DdNode *evaluatePostfix(DdManager *manager, char **postfix, int count, Function *varMap, int varCount);
 // Analisa a expressão infixada de entrada, converte para pós-fixada, e retorna o BDD resultante
-DdNode *parseInputExpression(DdManager *manager, const char *input, VarMap **outVarMap, int *outVarCount);
+DdNode *parseInputExpression(DdManager *manager, const char *input, Function **outVarMap, int *outVarCount);
 // Gera o bucket 1 com base no varMap retornado por parseInputExpression
-DdNode *initializeFirstBucket(DdManager *manager, VarMap *varMap, int varCount, Bucket *bucket, DdNode *objectiveExp);
+DdNode *initializeFirstBucket(DdManager *manager, Function *varMap, int varCount, Bucket *bucket, DdNode *objectiveExp, bool *found);
 // Combina dois BDDs com AND, OR ou NOT
 DdNode *combineBdds(DdManager *manager, DdNode *bdd1, DdNode *bdd2, char operator);
 // Função para criar um novo bucket de ordem l realizando todas as combinações possíveis entre todos os buckets de ordem n + m = l
-void createCombinedBucket(DdManager *manager, Bucket *buckets, int numBuckets, int targetOrder, DdNode *objectiveExp);
+bool createCombinedBucket(DdManager *manager, Bucket *buckets, int numBuckets, int targetOrder, DdNode *objectiveExp);
 
 int main(int argc, char *argv[])
 {
@@ -69,7 +64,9 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
     int numBuckets = 0;
-    VarMap *varMap = NULL;
+    bool found = false;
+    //Declarar localmente na firstBucket
+    Function *varMap = NULL;
     int varCount = 0;
     Bucket *buckets = NULL;
     // Parseia a expressão de entrada e obtém o BDD resultante
@@ -84,7 +81,8 @@ int main(int argc, char *argv[])
 
     // Inicializa o bucket 1
     buckets = addBucket(buckets, &numBuckets);
-    initializeFirstBucket(manager, varMap, varCount, &buckets[0], objectiveExp);
+    initializeFirstBucket(manager, varMap, varCount, &buckets[0], objectiveExp, &found);
+    if (!found) {
 
     printf("--- Bucket 1 (Ordem %d, Tamanho %d) ---\n", buckets[0].order, buckets[0].size);
     printBucket(manager, buckets[0], varCount);
@@ -97,11 +95,12 @@ int main(int argc, char *argv[])
 
     for (int order = 2; order <= varCount; order++)
     {
-        createCombinedBucket(manager, buckets, numBuckets, order, objectiveExp);
+        found = createCombinedBucket(manager, buckets, numBuckets, order, objectiveExp);
         printf("--- Bucket %d (Ordem %d, Tamanho %d) ---\n", order, buckets[order - 1].order, buckets[order - 1].size);
         printBucket(manager, buckets[order - 1], varCount);
+        if (found) break; // Sai do loop se encontrou a equivalência
     }
-
+    }
     /*
     int numBuckets = 1; // começa com um bucket, de ordem 1
     Bucket *buckets = (Bucket *)malloc(numBuckets * sizeof(Bucket));
@@ -302,7 +301,7 @@ bool isOperator(char c)
     return c == '+' || c == '*' || c == '!';
 }
 
-DdNode *evaluatePostfix(DdManager *manager, char **postfix, int count, VarMap *varMap, int varCount)
+DdNode *evaluatePostfix(DdManager *manager, char **postfix, int count, Function *varMap, int varCount)
 {
     DdNode *pilha[256]; // Pilha para avaliação
     int top = -1;       // Índice do topo da pilha
@@ -317,7 +316,7 @@ DdNode *evaluatePostfix(DdManager *manager, char **postfix, int count, VarMap *v
             DdNode *varBdd = NULL;
             for (int j = 0; j < varCount; j++)
             {
-                if (varMap[j].name == token[0])
+                if (varMap[j].implementation[0] == token[0])
                 {
                     varBdd = varMap[j].bdd;
                     break;
@@ -374,7 +373,7 @@ DdNode *evaluatePostfix(DdManager *manager, char **postfix, int count, VarMap *v
     return finalBdd;
 }
 
-DdNode *parseInputExpression(DdManager *manager, const char *input, VarMap **outVarMap, int *outVarCount)
+DdNode *parseInputExpression(DdManager *manager, const char *input, Function **outVarMap, int *outVarCount)
 {
     char *postfix[256]; // Para montar a expressão em pós-fixada
     int postfix_count = 0;
@@ -382,7 +381,7 @@ DdNode *parseInputExpression(DdManager *manager, const char *input, VarMap **out
     char op_stack[256]; // Pilha de operadores
     int op_top = -1;
 
-    VarMap local_var_map[52];
+    Function local_var_map[52];
     int var_count = 0;
 
     // Tokenização e Shunting-yard
@@ -405,12 +404,12 @@ DdNode *parseInputExpression(DdManager *manager, const char *input, VarMap **out
             bool found = false;
             for (int j = 0; j < var_count; j++)
             {
-                if (local_var_map[j].name == c)
+                if (local_var_map[j].implementation[0] == c)
                     found = true;
             }
             if (!found)
             {
-                local_var_map[var_count].name = c;
+                local_var_map[var_count].implementation = strdup(&c);
                 local_var_map[var_count].bdd = Cudd_bddIthVar(manager, var_count);
                 printf("Criada variável BDD %d para '%c'\n", var_count, c);
                 var_count++;
@@ -460,8 +459,8 @@ DdNode *parseInputExpression(DdManager *manager, const char *input, VarMap **out
     }
 
     // Avalia a expressão
-    *outVarMap = malloc(var_count * sizeof(VarMap));
-    memcpy(*outVarMap, local_var_map, var_count * sizeof(VarMap));
+    *outVarMap = malloc(var_count * sizeof(Function));
+    memcpy(*outVarMap, local_var_map, var_count * sizeof(Function));
     *outVarCount = var_count;
 
     DdNode *finalBdd = evaluatePostfix(manager, postfix, postfix_count, *outVarMap, var_count);
@@ -475,7 +474,7 @@ DdNode *parseInputExpression(DdManager *manager, const char *input, VarMap **out
     return finalBdd;
 }
 
-DdNode *initializeFirstBucket(DdManager *manager, VarMap *varMap, int varCount, Bucket *bucket, DdNode *objectiveExp)
+DdNode *initializeFirstBucket(DdManager *manager, Function *varMap, int varCount, Bucket *bucket, DdNode *objectiveExp, bool *found)
 {
     bucket->order = 1;
     bucket->size = varCount * 2; // Leva em conta o literal e seu complemento
@@ -496,7 +495,7 @@ DdNode *initializeFirstBucket(DdManager *manager, VarMap *varMap, int varCount, 
             fprintf(stderr, "Erro ao alocar memória para função do bucket.\n");
             exit(EXIT_FAILURE);
         }
-        varStr[0] = varMap[i].name;
+        varStr[0] = varMap[i].implementation[0];
         bucket->functions[i]->implementation = strdup(varStr);
         bucket->functions[i]->bdd = varMap[i].bdd;
         Cudd_Ref(bucket->functions[i]->bdd); // Referencia o BDD ao colocá-lo no bucket
@@ -508,7 +507,7 @@ DdNode *initializeFirstBucket(DdManager *manager, VarMap *varMap, int varCount, 
             exit(EXIT_FAILURE);
         }
 
-        notStr[1] = varMap[i].name;
+        notStr[1] = varMap[i].implementation[0];
         bucket->functions[i + varCount]->implementation = strdup(notStr);
         bucket->functions[i + varCount]->bdd = Cudd_Not(varMap[i].bdd);
         Cudd_Ref(bucket->functions[i + varCount]->bdd); // Referencia o BDD ao colocá-lo no bucket
@@ -571,9 +570,10 @@ void addFunctionToDynamicArray(Function *func, Function ***array, int *count, in
     (*count)++;
 }
 
-void createCombinedBucket(DdManager *manager, Bucket *buckets, int numBuckets, int targetOrder, DdNode *objectiveExp)
+bool createCombinedBucket(DdManager *manager, Bucket *buckets, int numBuckets, int targetOrder, DdNode *objectiveExp)
 {
     Bucket *targetBucket = &buckets[targetOrder - 1];
+    bool found = false; //Flag pra indicar se encontrou o objetivo ou não -> Será retornada ao final da função para sair do programa de forma limpa
 
     // Tabela hash para cada bucket, para garantir que não tenha combinações repetidas
     st_table *uniqueCheck = st_init_table(st_ptrcmp, st_ptrhash);
@@ -587,7 +587,8 @@ void createCombinedBucket(DdManager *manager, Bucket *buckets, int numBuckets, i
     Function **newFunctions = NULL;
     int newFuncCount = 0;
     int newFuncCapacity = 0;
-    char temps[256]; // Buffer temporário para implementações
+
+    // Provavelmente dá pra otimizar mais essa lógica, verificar depois se faz sentido
 
     for (int i = 0; i < numBuckets; i++)
     {
@@ -613,6 +614,7 @@ void createCombinedBucket(DdManager *manager, Bucket *buckets, int numBuckets, i
                         DdNode *newBdd = NULL;
                         for (int op = 0; op < 2; op++)
                         {
+                            //Não adicionar a negação para reduzir a quantidade de combinações totais, as negações já estão contempladas
                             if (op == 0){
                                 // AND
                                 newBdd = combineBdds(manager, bdd1, bdd2, '*');
@@ -624,7 +626,17 @@ void createCombinedBucket(DdManager *manager, Bucket *buckets, int numBuckets, i
                             // Filtra na Hash
                             if (st_lookup(uniqueCheck, (char *)newBdd, NULL) == 0 && newBdd != Cudd_ReadLogicZero(manager))
                             {
-                                //Combina as implentações
+                                int len1 = strlen(f1->implementation);
+                                int len2 = strlen(f2->implementation);
+                                // Tamanho para: '(', impl1, ' ', op, ' ', impl2, ')', '\0'
+                                int tamImp = len1 + len2 + 7; 
+
+                                char *temps = (char *)malloc(tamImp * sizeof(char));
+                                if (temps == NULL) {
+                                    fprintf(stderr, "Erro ao alocar string de implementação\n");
+                                    exit(EXIT_FAILURE);
+                                }
+                                //Combina as implementações
                                 sprintf(temps, "(%s %c %s)", f1->implementation, (op == 0) ? '*' : '+', f2->implementation);
 
                                 Function *newFunction = (Function *)malloc(sizeof(Function));
@@ -636,22 +648,6 @@ void createCombinedBucket(DdManager *manager, Bucket *buckets, int numBuckets, i
                                 newFunction->bdd = newBdd;
                                 newFunction->implementation = strdup(temps);
 
-                                // Verifica se é o objetivo
-                                if (newBdd == objectiveExp) {
-                                    printf("Equivalência encontrada:\n");
-                                    //printa as informações
-                                    printf("Implementação: %s\n", newFunction->implementation);
-                                    printf("No de literais: %d\n", targetOrder);
-                                    //Libera a memória alocada
-                                    free(newFunction->implementation);
-                                    free(newFunction);
-
-                                    printf("Encerrando a execução.\n");
-                                    // Libera a hash antes de sair
-                                    st_free_table(uniqueCheck);
-                                    //Ainda é problemático sair aqui, mas vai ficar por enquanto
-                                    exit(0);
-                                }
                                 // BDD é novo, insere na tabela hash
                                 st_insert(uniqueCheck, (char *)newBdd, (char *)newBdd);
 
@@ -677,6 +673,18 @@ void createCombinedBucket(DdManager *manager, Bucket *buckets, int numBuckets, i
     targetBucket->order = targetOrder;
     targetBucket->size = newFuncCount;
 
+    // Realiza a verificação de equivalência com o objetivo
+    for (int i = 0; i < newFuncCount; i++)
+    {
+        if (newFunctions[i]->bdd == objectiveExp)
+        {
+            printf("Equivalência encontrada (Ordem %d):\n", targetOrder);
+            printf("Implementação: %s\n", newFunctions[i]->implementation);
+            printf("No de literais: %d\n", targetOrder);
+            
+            found = true;
+        }
+
     //Não sei se é necessário, mas reduz o tamanho do array para economizar memória
     if (newFuncCount > 0 && newFuncCount < newFuncCapacity)
     {
@@ -684,4 +692,6 @@ void createCombinedBucket(DdManager *manager, Bucket *buckets, int numBuckets, i
     } else {
         targetBucket->functions = newFunctions;
     }
+    }
+    return found; // Retorna se encontrou ou não a equivalência
 }
