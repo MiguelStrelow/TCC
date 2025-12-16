@@ -4,7 +4,27 @@
 #include <string.h>
 #include <cudd.h>
 #include <st.h>
+//OpenMP mais por simplicidade e adequação ao código, altamente dependente de loops, que acredito serem paralelizáveis.
+//Eventualmente pode ser explorado o uso de MPI, para uma abordagem distribuída, mas isso seria um próximo trabalho. 
+#include <omp.h>
 
+
+/* Iniciando a versão paralela do código. A partir daqui, não temos mais guias. O primeiro passo seria localizar os pontos críticos que podem gerar
+condições de corrida. Vou fazer isso analisando novamente o código. Como o CUDD não é uma biblioteca thread-safe, vai dar um trabalhão, e o ganho
+pode acabar não sendo tão grande quanto esperado inicialmente, mas agora não dá tempo de mudar :) 
+Principais pontos que acredito serem críticos, antes da análise aprofundada:
+-> O CUDD manager, provavelmente vai dar problema se for acessado simultaneamente
+-> A hash de verificação, deve ser ok para verificações, mas a escrita provavelmente precisa ser única
+Possíveis soluções iniciais:
+Manager: 
+-> Usar um sistema básico de travas/semáforos -> Preciso estudar um pouco mais sobre pra saber o que seria adequado
+-> Cada Thread ter seu próprio manager -> Possivelmente piora o problema da explosão de memória, então não pretendo usar a princípio. Pode ser viável
+se conseguir uma máquina com mais recursos disponíveis.
+
+Hash:
+-> Permitir consultas a qualquer momento, mas barrar escritas. -> Inevitavelmente vai causar lentidão, mas a ideia é que isso seja compensado pelo
+paralelismo de tarefas / testar
+-> Retornar à hash única para cada bucket. Problemas de memória, muitas combinações desnecessárias, mas pode ser útil eventualmente*/
 typedef enum{
     VAR,
     NOT,
@@ -15,7 +35,7 @@ typedef enum{
 typedef struct Implementation
 {
     OpType operador; // 0 p/ var, 1 p/ not, 2 p/ and, 3 p/ or -> Substituido por enum pra ficar mais claro
-    char varName; //Apenas se operador == 0
+    char varName; //Apenas se operador == VAR
     struct Implementation *left;
     struct Implementation *right;
 } Implementation;
