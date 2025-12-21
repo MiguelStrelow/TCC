@@ -9,6 +9,8 @@
 #include <omp.h>
 
 
+#define PARALLEL_MIN_COMBINATIONS 3000
+
 /* Iniciando a versão paralela do código. A partir daqui, não temos mais guias. O primeiro passo seria localizar os pontos críticos que podem gerar
 condições de corrida. Vou fazer isso analisando novamente o código. Como o CUDD não é uma biblioteca thread-safe, vai dar um trabalhão, e o ganho
 pode acabar não sendo tão grande quanto esperado inicialmente, mas agora não dá tempo de mudar :) 
@@ -590,6 +592,8 @@ bool createCombinedBucket(DdManager *manager, Bucket *buckets, int numBuckets, i
     int newFuncCount = 0;
     int newFuncCapacity = 0;
 
+    bool stop = false;
+
     for (int i = 0; i < numBuckets; i++)
     {
         int order1 = buckets[i].order; 
@@ -599,7 +603,18 @@ bool createCombinedBucket(DdManager *manager, Bucket *buckets, int numBuckets, i
         
                 Bucket *b1 = &buckets[i];
                 Bucket *b2 = &buckets[j];
+                
+                if (stop) break; // Sai do loop se a flag de parada foi ativada na iteração passada
 
+                if (b1->size == 0 || b2->size == 0) continue;
+
+                // Calcula a carga de trabalho estimada
+                //long long por que o valor cresce de forma explosiva
+                long long total_iterations = (long long)b1->size * (long long)b2->size;
+                // Parallel inicia o paralelismo, for define o loop a ser paralelizado
+                // collapse(2) combina os loops aninhados, schedule(dynamid) distribui a carga dinamicamente
+                //if() define que só paralelize trabalho que compense o overhead (Valor estimado com base em testes)
+                #pragma omp parallel for collapse(2) schedule(dynamic) if(total_iterations > PARALLEL_MIN_COMBINATIONS)
                 for (int k = 0; k < b1->size; k++)
                 {
                     // Se buckets iguais, l começa de k
@@ -607,50 +622,105 @@ bool createCombinedBucket(DdManager *manager, Bucket *buckets, int numBuckets, i
                     
                     for (int l = startL; l < b2->size; l++)
                     {
+                        // Verifica se a flag de parada foi ativada
+                        #pragma omp flush(stop)
+                        if (stop) continue;
+
                         Function *f1 = b1->functions[k];
                         Function *f2 = b2->functions[l];
                         
                         for (int op = 0; op < 2; op++)
                         {
-                            DdNode *newBdd;
+                            if (stop) continue; //Só pra garantir
+                            DdNode *newBdd = NULL;
                             char opChar = (op == 0) ? '*' : '+';
-                            newBdd = combineBdds(manager, f1->bdd, f2->bdd, opChar);
-
+                            //Crítico pois precisa acessar o manager, que é compartilhado
+                            #pragma omp critical(combine_bdds)
+                            {
+                                if(!stop)
+                                newBdd = combineBdds(manager, f1->bdd, f2->bdd, opChar);
+                            }
+                            if (newBdd == NULL) continue; //Caso tenha parado dentro do critical
+                            
                             //Parada imediata caso encontre equivalência
                             if (newBdd == objectiveExp && choice == 'e')
                             {
-                                printf("\n!!! EQUIVALÊNCIA ENCONTRADA (Ordem %d) !!!\n", targetOrder);
+                                #pragma omp critical(success_report)
+                                {
+                                    if(!stop) 
+                                    {
+                                        stop = true; // Ativa a flag de parada
+                                    
+                                        printf("\n!!! EQUIVALÊNCIA ENCONTRADA (Ordem %d) !!!\n", targetOrder);
                                 
-                                Implementation *temp = opNode((opChar == '*') ? AND : OR, f1->impRoot, f2->impRoot); 
-                                printImplementation(temp);
-                                printf("\n");
+                                        Implementation *temp = opNode((opChar == '*') ? AND : OR, f1->impRoot, f2->impRoot); 
+                                        printImplementation(temp);
 
-                                printf("No de literais: %d\n", targetOrder);
+                                        printf("\nNo de literais: %d\n", targetOrder);
                                 
-                                // Limpa o que foi alocado temporariamente e retorna true
-                                free(temp);
-                                free(newFunctions); // Limpa o array parcial se houver
-                                return true; 
+                                         // Limpa o que foi alocado temporariamente e retorna true
+                                        free(temp);
+                                    }
+                                }
+
+                                #pragma omp critical(deref_bdd)
+                                {
+                                    Cudd_RecursiveDeref(manager, newBdd);
+                                }
+                                #pragma omp flush(stop)
+                                continue;
                             }
 
-                            if (st_lookup(uniqueCheck, (char *)newBdd, NULL) == 0 && newBdd != Cudd_ReadLogicZero(manager))
+                            if (newBdd != Cudd_ReadLogicZero(manager) || newBdd != Cudd_ReadOne(manager))
                             {
+                                bool inserted = false;
 
-                                Function *newFunction = (Function *)malloc(sizeof(Function));
-                                newFunction->bdd = newBdd;
-                                newFunction->impRoot = opNode((opChar == '*') ? AND : OR, f1->impRoot, f2->impRoot);
+                                #pragma omp critical(hash_insert)
+                                {
+                                    st_insert(uniqueCheck, (char *)newBdd, (char *)newBdd);
+                                    
+                                    Function *newFunction = (Function *)malloc(sizeof(Function));
+                                    newFunction->bdd = newBdd;
+                                    newFunction->impRoot = opNode((opChar == '*') ? AND : OR, f1->impRoot, f2->impRoot);
 
-                                st_insert(uniqueCheck, (char *)newBdd, (char *)newBdd);
-                                addFunctionToDynamicArray(newFunction, &newFunctions, &newFuncCount, &newFuncCapacity);
+                                
+                                    addFunctionToDynamicArray(newFunction, &newFunctions, &newFuncCount, &newFuncCapacity);
+                                    inserted = true;    
+                                }
+                            
+                                if(!inserted)
+                                {
+                                    #pragma omp critical(deref_bdd)
+                                    {
+                                        Cudd_RecursiveDeref(manager, newBdd);
+                                    }
+                                }
                             }
+
                             else
                             {
-                                Cudd_RecursiveDeref(manager, newBdd);
+                                #pragma omp critical(deref_bdd)
+                                {
+                                    Cudd_RecursiveDeref(manager, newBdd);
+                                }
                             }
+                            
                         }
                     }
                 }
             }
+
+            if(stop){
+                //Limpar o que foi alocado
+                for(int i=0; i<newFuncCount; i++) {
+                    Cudd_RecursiveDeref(manager, newFunctions[i]->bdd);
+                    free(newFunctions[i]->impRoot);
+                    free(newFunctions[i]);
+                }
+                free(newFunctions);
+                return true;    
+            }
+
 
     targetBucket->order = targetOrder;
     targetBucket->size = newFuncCount;
