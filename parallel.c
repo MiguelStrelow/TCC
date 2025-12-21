@@ -67,11 +67,7 @@ void printBucket(DdManager *manager, Bucket bucket, int varCount);
 // Função para liberar memória alocada
 // void freeAll(Bucket *buckets, int numBuckets);
 void freeAllBuckets(DdManager *manager, Bucket *buckets, int numBuckets);
-// Função para combinar dois buckets
-// void combineBuckets(Bucket b1, Bucket b2, Bucket *result);
-// Função para criar um novo bucket de ordem l realizando todas as combinações possíveis entre todos os buckets de ordem n + m = l
-// void createCombinedBucket(Bucket *buckets, int numBuckets, int targetOrder);
-// Função para precedência de operadores
+// Função para checar precedência de operadores
 int getPrecedence(char op);
 // Função para verificar se é operador
 bool isOperator(char c);
@@ -81,7 +77,7 @@ DdNode *evaluatePostfix(DdManager *manager, char **postfix, int count, Function 
 DdNode *parseInputExpression(DdManager *manager, const char *input, Function **outVarMap, int *outVarCount, int *literalCount);
 // Gera o bucket 1 com base no varMap retornado por parseInputExpression
 DdNode *initializeFirstBucket(DdManager *manager, Function *varMap, int varCount, Bucket *bucket, DdNode *objectiveExp, bool *found, st_table *uniqueCheck);
-// Combina dois BDDs com AND, OR ou NOT
+// Combina dois BDDs com AND, OR ou NOT -> gera todos os SOP'S e POS'S
 DdNode *combineBdds(DdManager *manager, DdNode *bdd1, DdNode *bdd2, char operator);
 // Função para criar um novo bucket de ordem l realizando todas as combinações possíveis entre todos os buckets de ordem n + m = l
 bool createCombinedBucket(DdManager *manager, Bucket *buckets, int numBuckets, int targetOrder, DdNode *objectiveExp, st_table *uniqueCheck, char choice);
@@ -94,11 +90,16 @@ void printImplementation(Implementation* node);
 
 int main(int argc, char *argv[])
 {
+    //A princípio toda a primeira parte da execução é sequencial, paralelizar iria gerar overhead desnecessário
     if (argc < 2)
     {
         fprintf(stderr, "Uso: %s <expressão>\n", argv[0]);
         return EXIT_FAILURE;
     }
+    /* Primeiro possível ponto crítico é esse carinha aqui.
+    Usar uma trava para evitar acessos simultâneos dentro da função, permitindo que o resto das
+    operações sejam paralelas. Vai reduzir bastante o ganho potencial, para ganhos maiores o ideal é usar uma biblioteca de CUDD thread-safe.
+    */
     DdManager *manager = Cudd_Init(0, 0, CUDD_UNIQUE_SLOTS, CUDD_CACHE_SLOTS, 0);
     if (manager == NULL)
     {
@@ -107,6 +108,13 @@ int main(int argc, char *argv[])
     }
 
     //tabela hash para verificar duplicatas, migrada para cá pra permitir verificação entre buckets
+    //Segundo possível ponto crítico de corrida
+    /*Soluções possíveis:
+    -> Usar travas/semáforos para controlar o acesso à tabela hash durante operações de escrita.
+    -> Cada thread ter sua própria tabela hash e depois mesclar os resultados (mais trabalhoso).
+    -> Utilizar uma biblioteca de hash thread-safe (complicado de integrar, mas pode ser necessário).
+    -> Manter a tabela hash única, mas limitar as operações de escrita a momentos específicos, usando barreiras.
+    */
     st_table *uniqueCheck = st_init_table(st_ptrcmp, st_ptrhash);
     if (uniqueCheck == NULL)
     {
@@ -167,7 +175,8 @@ int main(int argc, char *argv[])
         scanf(" %c", &choice);  
     for (int order = 2; order <= varCount+1; order++)
     {
-  
+        //Aqui começa a parte paralela
+        //Dentro da função, quero que cada thread trate de combinar buckets diferentes
         found = createCombinedBucket(manager, buckets, numBuckets, order, objectiveExp, uniqueCheck, choice);
         if (found) break; // Sai do loop se encontrou a equivalência
         printf("--- Bucket %d (Ordem %d, Tamanho %d) ---\n", order, buckets[order - 1].order, buckets[order - 1].size);
@@ -180,38 +189,10 @@ int main(int argc, char *argv[])
     }
 
     // Após o uso, libera a hash
+    // Vou ter que rever todos os frees mais pra frente
     st_free_table(uniqueCheck);
 
-    /*
-    int numBuckets = 1; // começa com um bucket, de ordem 1
-    Bucket *buckets = (Bucket *)malloc(numBuckets * sizeof(Bucket));
-    if (buckets == NULL) {
-        fprintf(stderr, "Erro ao alocar memória para buckets.\n");
-        exit(EXIT_FAILURE);
-    }
-        parseInput(manager, argv[1], &buckets[0]);
-        printBucket(buckets[0]);
-        buckets[0].order = 1;
-        buckets[0].function = (char **)malloc(4 * sizeof(char *));
-        buckets[0].function[0] = strdup("A");
-        buckets[0].function[1] = strdup("B");
-        buckets[0].function[2] = strdup("C");
-        buckets[0].function[3] = NULL;
-        buckets[0].size = 3;
-        printBucket(buckets[0]);
-
-    buckets = addBucket(buckets, &numBuckets);
-
-    // Cria um novo bucket combinando o de ordem 1 com ele mesmo
-    combineBuckets(buckets[0], buckets[0], &buckets[1]);
-
-    printBucket(buckets[1]);
-    buckets = addBucket(buckets, &numBuckets);
-    combineBuckets(buckets[1], buckets[0], &buckets[2]);
-    printBucket(buckets[2]);
-    createCombinedBucket(buckets, numBuckets, 4);
-    printBucket(buckets[3]);
-    freeAll(buckets, numBuckets);*/
+ 
     Cudd_RecursiveDeref(manager, objectiveExp);
     freeAllBuckets(manager, buckets, numBuckets);
     free(varMap);
@@ -219,49 +200,7 @@ int main(int argc, char *argv[])
     return 0;
 }
 
-/*void combineBuckets(Bucket b1, Bucket b2, Bucket *result) {
-    int combinations = b1.size * b2.size;
-    int total_functions = combinations * 2;
 
-    result->order = b1.order + b2.order;
-    result->size = total_functions;
-    result->functions = (char **)malloc((total_functions + 1) * sizeof(char *));
-    if (result->functions == NULL) {
-        fprintf(stderr, "Erro ao alocar memória para funções do bucket.\n");
-        exit(EXIT_FAILURE);
-    }
-
-    int currentIndex = 0;
-    for (int i = 0; i < b1.size; i++) {
-        for (int j = 0; j < b2.size; j++) {
-            char *func1 = b1.functions[i];
-            char *func2 = b2.functions[j];
-            int len1 = strlen(func1);
-            int len2 = strlen(func2);
-
-            // Aloca memória para as novas strings (+ e *)
-            char *plus_combination = (char *)malloc(len1 + len2 + 2);
-            char *mult_combination = (char *)malloc(len1 + len2 + 2);
-
-            if (plus_combination == NULL || mult_combination == NULL) {
-                fprintf(stderr, "Erro ao alocar memória para combinação de strings.\n");
-                exit(EXIT_FAILURE);
-            }
-
-            // Cria as novas strings
-            sprintf(plus_combination, "%s+%s", func1, func2);
-            sprintf(mult_combination, "%s*%s", func1, func2);
-
-            // Adiciona ao bucket de resultado
-            result->functions[currentIndex] = plus_combination;
-            result->functions[currentIndex + combinations] = mult_combination;
-            currentIndex++;
-        }
-    }
-    result->functions[total_functions] = NULL; // Termina a lista
-}
-
-*/
 Bucket *addBucket(Bucket *buckets, int *numBuckets)
 {
     (*numBuckets)++;
@@ -276,18 +215,6 @@ Bucket *addBucket(Bucket *buckets, int *numBuckets)
     buckets[(*numBuckets) - 1].size = 0;
     return buckets;
 }
-/*
-void printBucket(Bucket bucket) {
-    printf("Bucket Order: %d\n", bucket.order);
-    if (bucket.functions != NULL) {
-        for (int i = 0; bucket.functions[i] != NULL; i++) {
-            printf("functions[%d]: %s\n", i, bucket.functions[i]);
-        }
-    } else {
-        printf("No functions in this bucket.\n");
-    }
-}
-*/
 
 void printBucket(DdManager *manager, Bucket bucket, int varCount)
 {
@@ -308,17 +235,6 @@ void printBucket(DdManager *manager, Bucket bucket, int varCount)
     }
 }
 
-/*void freeAll(Bucket *buckets, int numBuckets){
-    for (int i = 0; i < numBuckets; i++) {
-        if (buckets[i].functions != NULL) {
-            for (int j = 0; buckets[i].functions[j] != NULL; j++) {
-                free(buckets[i].functions[j]);
-            }
-            free(buckets[i].functions);
-        }
-    }
-    free(buckets);
-}*/
 void freeAllBuckets(DdManager *manager, Bucket *buckets, int numBuckets)
 {
     if (buckets == NULL)
@@ -351,22 +267,6 @@ void freeAllBuckets(DdManager *manager, Bucket *buckets, int numBuckets)
     }
     free(buckets); // Libera o array de buckets
 }
-/*
-void createCombinedBucket(Bucket *buckets, int numBuckets, int targetOrder){
-    for(int i = numBuckets; i < targetOrder; i++){
-        buckets = addBucket(buckets, &numBuckets);
-        createCombinedBucket(buckets, numBuckets, i);
-    }
-
-    for(int i = 0; i < numBuckets; i++){
-        for(int j = 0; j < numBuckets; j++){
-            if(buckets[i].order + buckets[j].order == targetOrder){
-                combineBuckets(buckets[i], buckets[j], &buckets[targetOrder - 1]);
-            }
-        }
-    }
-}
-*/
 int getPrecedence(char op)
 {
     switch (op)
@@ -564,78 +464,6 @@ DdNode *parseInputExpression(DdManager *manager, const char *input, Function **o
     return finalBdd;
 }
 
-/*DdNode *initializeFirstBucket(DdManager *manager, Function *varMap, int varCount, Bucket *bucket, DdNode *objectiveExp, bool *found, st_table *uniqueCheck)
-{
-    bucket->order = 1;
-    bucket->functions = (Function **)malloc(((varCount * 2) + 1) * sizeof(Function *));
-    if (bucket->functions == NULL) exit(EXIT_FAILURE);
-
-    int actualSize = 0;
-    char varStr[2] = {'\0', '\0'};
-    
-    for (int i = 0; i < varCount; i++)
-    {
-        DdNode *varBdd = varMap[i].bdd;
-        
-        // Calcula Cofatores: f(x=1) e f(x=0)
-        DdNode *cofPos = Cudd_Cofactor(manager, objectiveExp, varBdd);
-        Cudd_Ref(cofPos);
-        DdNode *cofNeg = Cudd_Cofactor(manager, objectiveExp, Cudd_Not(varBdd));
-        Cudd_Ref(cofNeg);
-        
-        //Verifica Dependência: Se f(1) == f(0), a função não depende da variável
-        if (cofPos == cofNeg) {
-            Cudd_RecursiveDeref(manager, cofPos);
-            Cudd_RecursiveDeref(manager, cofNeg);
-            continue; 
-        }
-
-        //Verifica Unicidade
-
-        bool isPosUnate = Cudd_bddLeq(manager, cofNeg, cofPos); 
-        bool isNegUnate = Cudd_bddLeq(manager, cofPos, cofNeg);
-
-        Cudd_RecursiveDeref(manager, cofPos);
-        Cudd_RecursiveDeref(manager, cofNeg);
-
-        // Adiciona se NÃO for estritamente negativa
-        if (!isNegUnate) {
-            bucket->functions[actualSize] = (Function *)malloc(sizeof(Function));
-            varStr[0] = varMap[i].impRoot->varName;
-            bucket->functions[actualSize]->impRoot = varNode(varStr[0]);
-            bucket->functions[actualSize]->bdd = varMap[i].bdd;
-            Cudd_Ref(bucket->functions[actualSize]->bdd);
-            st_insert(uniqueCheck, (char *)bucket->functions[actualSize]->bdd, (char *)bucket->functions[actualSize]->bdd);
-
-            if (bucket->functions[actualSize]->bdd == objectiveExp) {
-                printf("Solução Encontrada (Ordem 1): %c\n", bucket->functions[actualSize]->impRoot->varName);
-                *found = true;
-            }
-            actualSize++;
-        }
-
-        // Adiciona se NÃO for estritamente positiva
-        if (!isPosUnate) {
-            bucket->functions[actualSize] = (Function *)malloc(sizeof(Function));
-            bucket->functions[actualSize]->impRoot = opNode(NOT, varNode(varMap[i].impRoot->varName), NULL);
-            bucket->functions[actualSize]->bdd = Cudd_Not(varMap[i].bdd);
-            Cudd_Ref(bucket->functions[actualSize]->bdd);
-            st_insert(uniqueCheck, (char *)bucket->functions[actualSize]->bdd, (char *)bucket->functions[actualSize]->bdd);
-
-            if (bucket->functions[actualSize]->bdd == objectiveExp) {
-                 printf("Solução Encontrada (Ordem 1):" );
-
-                 printImplementation(bucket->functions[actualSize]->impRoot);
-                 printf("\n");
-                *found = true;
-            }
-            actualSize++;
-        }
-    }
-
-    bucket->size = actualSize;
-    return NULL;
-}*/
 
 DdNode *initializeFirstBucket(DdManager *manager, Function *varMap, int varCount, Bucket *bucket, DdNode *objectiveExp, bool *found, st_table *uniqueCheck)
 {
