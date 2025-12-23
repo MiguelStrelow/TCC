@@ -3,7 +3,8 @@ CC = gcc
 
 # --- CONFIGURAÇÃO DO CUDD ---
 # O caminho para o diretório do CUDD (que agora está compilado e instalado)
-CUDD_PREFIX = /home/miguelstrelow/cudd
+# Atualizado para o caminho local do repositório: permita sobrescrever pela linha de comando (ex: make CUDD_PREFIX=/path/to/cudd)
+CUDD_PREFIX = /home/miguel/cudd_installation/cudd
 # --- FIM DA CONFIGURAÇÃO ---
 
 # Executable name
@@ -27,7 +28,7 @@ LDFLAGS = -L$(CUDD_PREFIX)/lib
 
 # Linker libraries:
 # Agora só precisamos de -lcudd, pois st e util estão incluídas nela.
-LDLIBS = -lcudd -lm
+LDLIBS = -fopenmp -lcudd -lm
 
 # Phony targets are not actual files.
 .PHONY: all clean run

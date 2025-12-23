@@ -4,6 +4,7 @@
 #include <string.h>
 #include <cudd.h>
 #include <st.h>
+#include <time.h> 
 
 typedef enum{
     VAR,
@@ -74,6 +75,7 @@ void printImplementation(Implementation* node);
 
 int main(int argc, char *argv[])
 {
+    time_t start = time(NULL);
     if (argc < 2)
     {
         fprintf(stderr, "Uso: %s <expressão>\n", argv[0]);
@@ -196,6 +198,8 @@ int main(int argc, char *argv[])
     freeAllBuckets(manager, buckets, numBuckets);
     free(varMap);
     Cudd_Quit(manager);
+    time_t end = time(NULL);
+    printf("Tempo total de execução: %ld segundos\n", end - start);
     return 0;
 }
 
