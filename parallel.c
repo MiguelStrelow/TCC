@@ -1,3 +1,4 @@
+#define _POSIX_C_SOURCE 199309L
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
@@ -11,7 +12,7 @@
 
 
 #define PARALLEL_MIN_COMBINATIONS 3000
-
+#define BATCH_SIZE 128
 /* Iniciando a versão paralela do código. A partir daqui, não temos mais guias. O primeiro passo seria localizar os pontos críticos que podem gerar
 condições de corrida. Vou fazer isso analisando novamente o código. Como o CUDD não é uma biblioteca thread-safe, vai dar um trabalhão, e o ganho
 pode acabar não sendo tão grande quanto esperado inicialmente, mas agora não dá tempo de mudar :) 
@@ -64,7 +65,12 @@ typedef struct
     int size;
 } Bucket;
 
-
+typedef struct {
+    Function *f1;
+    Function *f2;
+    DdNode *bdd;
+    char op;
+} CombinationBuffer;
 
 
 //Adicionar apenas os literais no objetivo, remover as negações desnecessárias
@@ -104,7 +110,13 @@ void printFunction(Function* node);
 
 int main(int argc, char *argv[])
 {
-    time_t start = time(NULL);
+    struct timespec tstart = {0,0}, tend = {0,0};
+
+    if (clock_gettime(CLOCK_MONOTONIC, &tstart) != 0) {
+        perror("Erro em clock_gettime start");
+        return EXIT_FAILURE;
+    }
+
     //A princípio toda a primeira parte da execução é sequencial, paralelizar iria gerar overhead desnecessário
     if (argc < 3)
     {
@@ -228,8 +240,17 @@ int main(int argc, char *argv[])
     }
 
     Cudd_Quit(manager);
-    time_t end = time(NULL);
-    printf("Tempo total de execução: %ld segundos\n", end - start);
+
+    if (clock_gettime(CLOCK_MONOTONIC, &tend) != 0) {
+        perror("Erro em clock_gettime end");
+        return EXIT_FAILURE;
+    }
+
+    double time_taken;
+    time_taken = (double)(tend.tv_sec - tstart.tv_sec) + 
+                 (double)(tend.tv_nsec - tstart.tv_nsec) / 1.0e9;
+
+    printf("Tempo total de execução: %.6f segundos\n", time_taken);
     return 0;
 }
 
@@ -655,7 +676,13 @@ bool createCombinedBucket(DdManager *manager, Bucket *buckets, int numBuckets, i
                 // Parallel inicia o paralelismo, for define o loop a ser paralelizado
                 // collapse(2) combina os loops aninhados, schedule(dynamid) distribui a carga dinamicamente
                 //if() define que só paralelize trabalho que compense o overhead (Valor estimado com base em testes)
-                #pragma omp parallel for collapse(2) schedule(dynamic) if(total_iterations > PARALLEL_MIN_COMBINATIONS)
+                #pragma omp parallel if(total_iterations > PARALLEL_MIN_COMBINATIONS)
+                {
+                    //Vou aplicar batching pra diminuir o overhead de criação de threads e mudança de contexto
+                    CombinationBuffer buffer[BATCH_SIZE];
+                    int buffer_count = 0;
+                
+                #pragma omp for collapse(2) schedule(dynamic) nowait
                 for (int k = 0; k < b1->size; k++)
                 {
                     for (int l = 0; l < b2->size; l++)
@@ -672,8 +699,10 @@ bool createCombinedBucket(DdManager *manager, Bucket *buckets, int numBuckets, i
                         for (int op = 0; op < 2; op++)
                         {
                             if (stop) continue; //Só pra garantir
+
                             DdNode *newBdd = NULL;
                             char opChar = (op == 0) ? '*' : '+';
+
                             //Crítico pois precisa acessar o manager, que é compartilhado
                             #pragma omp critical(bdd_access)
                             {
@@ -682,6 +711,14 @@ bool createCombinedBucket(DdManager *manager, Bucket *buckets, int numBuckets, i
                             }
                             if (newBdd == NULL) continue; //Caso tenha parado dentro do critical
                             
+
+                            if (newBdd == Cudd_ReadLogicZero(manager) || newBdd == Cudd_ReadOne(manager)) {
+                             #pragma omp critical(bdd_access)
+                             Cudd_RecursiveDeref(manager, newBdd);
+                             continue;
+                            }
+
+
                             //Parada imediata caso encontre equivalência
                             if (newBdd == objectiveExp && choice == 'e')
                             {
@@ -706,52 +743,67 @@ bool createCombinedBucket(DdManager *manager, Bucket *buckets, int numBuckets, i
                                     }
                                 }
 
-                                #pragma omp critical(deref_bdd)
+                                #pragma omp critical(bdd_access)
                                 {
                                     Cudd_RecursiveDeref(manager, newBdd);
                                 }
-                                #pragma omp flush(stop)
                                 continue;
                             }
 
-                            if (newBdd != Cudd_ReadLogicZero(manager) || newBdd != Cudd_ReadOne(manager))
-                            {
-                                bool inserted = false;
 
+                            buffer[buffer_count].f1 = f1;
+                            buffer[buffer_count].f2 = f2;
+                            buffer[buffer_count].bdd = newBdd;
+                            buffer[buffer_count].op = opChar;
+                            buffer_count++;
+
+                            if (buffer_count == BATCH_SIZE)
+                            {
                                 #pragma omp critical(bdd_access)
                                 {
-                                    if(st_insert(uniqueCheck, (char *)newBdd, (char *)newBdd) == 0){
-                                        // Novo BDD, pode inserir
-                                        Function *newFunction = opNode((opChar == '*') ? AND : OR, f1, f2, newBdd);
-                                        //logExpressionToFile(newFunction, targetOrder);
-                                        addFunctionToDynamicArray(newFunction, &newFunctions, &newFuncCount, &newFuncCapacity);
-                                        inserted = true;
-                                    }
-                                    
-
-                                }
-                            
-                                if(!inserted)
-                                {
-                                    #pragma omp critical(bdd_access)
+                                    for (int b = 0; b<buffer_count; b++)
                                     {
-                                        Cudd_RecursiveDeref(manager, newBdd);
+                                        #pragma omp flush(stop)
+                                        if(stop){
+                                            Cudd_RecursiveDeref(manager, buffer[b].bdd);
+                                            continue;
+                                        }
+                                    if (st_insert(uniqueCheck, (char *)buffer[b].bdd, (char *)buffer[b].bdd) == 0) {
+                                        
+                                        Function *newFunction = opNode((buffer[b].op == '*') ? AND : OR, buffer[b].f1, buffer[b].f2, buffer[b].bdd);
+                                
+                                        addFunctionToDynamicArray(newFunction, &newFunctions, &newFuncCount, &newFuncCapacity);
+                                    } else {
+
+                                        Cudd_RecursiveDeref(manager, buffer[b].bdd);
                                     }
                                 }
                             }
-
-                            else
-                            {
-                                #pragma omp critical(bdd_access)
-                                {
-                                    Cudd_RecursiveDeref(manager, newBdd);
-                                }
-                            }
-                            
+                            buffer_count = 0; // Reseta o buffer
                         }
                     }
                 }
+            } // Fim do loop for
+            if (buffer_count > 0) {
+                #pragma omp critical(bdd_access)
+                {
+                    for (int b = 0; b < buffer_count; b++) {
+                        if(stop) {
+                             Cudd_RecursiveDeref(manager, buffer[b].bdd);
+                             continue;
+                        }
+                        if (st_insert(uniqueCheck, (char *)buffer[b].bdd, (char *)buffer[b].bdd) == 0) {
+                            Function *newFunction = opNode((buffer[b].op == '*') ? AND : OR, buffer[b].f1, buffer[b].f2, buffer[b].bdd);
+                            addFunctionToDynamicArray(newFunction, &newFunctions, &newFuncCount, &newFuncCapacity);
+                        } else {
+                            Cudd_RecursiveDeref(manager, buffer[b].bdd);
+                        }
+                    }
+                }
+                buffer_count = 0;
             }
+        } // Fim do parallel region
+    }
 
             if(stop){
                 //Limpar o que foi alocado
@@ -785,6 +837,7 @@ bool createCombinedBucket(DdManager *manager, Bucket *buckets, int numBuckets, i
             return true;
         }
     }
+
 
     return false;
 }
