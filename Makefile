@@ -2,51 +2,54 @@
 CC = gcc
 
 # --- CONFIGURAÇÃO DO CUDD ---
-# O caminho para o diretório do CUDD (que agora está compilado e instalado)
-# Atualizado para o caminho local do repositório: permita sobrescrever pela linha de comando (ex: make CUDD_PREFIX=/path/to/cudd)
 CUDD_PREFIX = /home/miguel/cudd_installation/cudd
 # --- FIM DA CONFIGURAÇÃO ---
 
-# Executable name
-TARGET = teste
+# Nomes dos executáveis que queremos gerar
+EXEC1 = parallel
+EXEC2 = teste
 
-# Source file
-SRC = teste.c
-
-# Compiler flags: 
-# -g (debug), -Wall (warnings)
-# Aponta para os locais REAIS dos cabeçalhos:
-# -I.../epd/include (para cudd.h, como visto na imagem)
-# -I.../st          (para st.h, como visto na imagem)
+# Flags do Compilador
 CFLAGS = -g -Wall \
-	-I$(CUDD_PREFIX)/epd/include \
-	-I$(CUDD_PREFIX)/st
+    -I$(CUDD_PREFIX)/epd/include \
+    -I$(CUDD_PREFIX)/st
 
-# Linker flags:
-# Aponta para a nova pasta 'lib' que foi criada
+# Flags do Linker
 LDFLAGS = -L$(CUDD_PREFIX)/lib
 
-# Linker libraries:
-# Agora só precisamos de -lcudd, pois st e util estão incluídas nela.
+# Bibliotecas
 LDLIBS = -fopenmp -lcudd -lm
 
-# Phony targets are not actual files.
-.PHONY: all clean run
+# Phony targets
+.PHONY: all clean run run_teste debug
 
-# Default target: builds the executable.
-all: $(TARGET)
+# Target padrão: compila TODOS os executáveis listados
+all: $(EXEC1) $(EXEC2)
 
-# Rule to build the executable from the source file.
-# O $(LDFLAGS) é adicionado aqui, antes de $(LDLIBS)
-$(TARGET): $(SRC)
-	$(CC) $(CFLAGS) -o $(TARGET) $(SRC) $(LDFLAGS) $(LDLIBS)
+# --- REGRAS DE COMPILAÇÃO ---
 
-# Rule to clean up generated files.
+# Regra Genérica (Pattern Rule):
+# "Para criar qualquer arquivo sem extensão (%) a partir de um .c (%.c)..."
+# O $@ representa o alvo (ex: parallel) e o $< representa a fonte (ex: parallel.c)
+%: %.c
+	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS) $(LDLIBS)
+
+# --- OPÇÃO DE DEBUG (Baseado na nossa conversa anterior) ---
+# Se você rodar 'make debug', ele adiciona a flag -DDEBUG e recompila tudo
+debug: CFLAGS += -DDEBUG
+debug: clean all
+
+# --- LIMPEZA ---
 clean:
-	rm -f $(TARGET)
+	rm -f $(EXEC1) $(EXEC2) *.o *.log
 
-# Rule to run the executable.
-# Use assim: make run ARGS="A*B+!C"
-run: $(TARGET)
-	./$(TARGET) "$(ARGS)"
+# --- EXECUÇÃO ---
 
+# Roda o programa principal (Parallel)
+# Uso: make run ARGS="A+B" OPTS="c"
+run: $(EXEC1)
+	./$(EXEC1) "$(ARGS)" $(OPTS)
+
+# Roda o programa de teste
+run_teste: $(EXEC2)
+	./$(EXEC2)

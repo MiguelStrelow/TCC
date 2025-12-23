@@ -98,14 +98,18 @@ Function* varNode(char varName, DdNode *bdd);
 Function* opNode(OpType operador, Function* left, Function* right, DdNode *bdd);
 //Printar a implementação
 void printFunction(Function* node);
+//Para log
+//void fprintFunction(FILE *f, Function* node);
+//void logExpressionToFile(Function *node, int ordem);
 
 int main(int argc, char *argv[])
 {
     time_t start = time(NULL);
     //A princípio toda a primeira parte da execução é sequencial, paralelizar iria gerar overhead desnecessário
-    if (argc < 2)
+    if (argc < 3)
     {
-        fprintf(stderr, "Uso: %s <expressão>\n", argv[0]);
+        fprintf(stderr, "Uso: %s <expressão> <modo>\n", argv[0]);
+        fprintf(stderr, "Modos disponíveis:\n e - parar ao encontrar equivalência\n c - completar o bucket final\n");
         return EXIT_FAILURE;
     }
     /* Primeiro possível ponto crítico é esse carinha aqui.
@@ -118,6 +122,9 @@ int main(int argc, char *argv[])
         fprintf(stderr, "Erro ao inicializar o CUDD.\n");
         return EXIT_FAILURE;
     }
+
+    //Por estabilidade no paralelismo, desabilitar autodyn
+    Cudd_AutodynDisable(manager);
 
     //tabela hash para verificar duplicatas, migrada para cá pra permitir verificação entre buckets
     //Segundo possível ponto crítico de corrida
@@ -134,7 +141,14 @@ int main(int argc, char *argv[])
         Cudd_Quit(manager);
         return EXIT_FAILURE;
     }
-    char choice;
+    
+    char choice = argv[2][0];
+
+    if (choice != 'e' && choice != 'c') {
+        fprintf(stderr, "Erro: Modo inválido '%c'. Use 'e' ou 'c'.\n", choice);
+        return EXIT_FAILURE;
+    }
+
     int numBuckets = 0;
     bool found = false;
     //Declarar localmente na firstBucket
@@ -183,8 +197,6 @@ int main(int argc, char *argv[])
     {
         buckets = addBucket(buckets, &numBuckets);
     }
-        printf("Parar ao encontrar equivalencia, ou completar o bucket? (e/c): ");
-        scanf(" %c", &choice);  
     for (int order = 2; order <= varCount+1; order++)
     {
         //Aqui começa a parte paralela
@@ -207,7 +219,14 @@ int main(int argc, char *argv[])
  
     Cudd_RecursiveDeref(manager, objectiveExp);
     freeAllBuckets(manager, buckets, numBuckets);
-    free(varMap);
+
+    if (varMap != NULL) {
+        for (int i = 0; i < varCount; i++) {
+            Cudd_RecursiveDeref(manager, varMap[i].bdd);
+        }
+        free(varMap);
+    }
+
     Cudd_Quit(manager);
     time_t end = time(NULL);
     printf("Tempo total de execução: %ld segundos\n", end - start);
@@ -416,6 +435,7 @@ DdNode *parseInputExpression(DdManager *manager, const char *input, Function **o
                 local_var_map[var_count].left = NULL;
                 local_var_map[var_count].right = NULL;
                 local_var_map[var_count].bdd = Cudd_bddIthVar(manager, var_count);
+                Cudd_Ref(local_var_map[var_count].bdd);
                 printf("Criada variável BDD %d para '%c'\n", var_count, c);
                 var_count++;
             }
@@ -522,6 +542,7 @@ DdNode *initializeFirstBucket(DdManager *manager, Function *varMap, int varCount
             bucket->functions[actualSize] = varNode(varMap[i].varName, varMap[i].bdd);
             // Insere na tabela hash de verificação
             st_insert(uniqueCheck, (char *)bucket->functions[actualSize]->bdd, (char *)bucket->functions[actualSize]->bdd);
+            //logExpressionToFile(bucket->functions[actualSize], 1);
             //Verifica se é solução
             if (bucket->functions[actualSize]->bdd == objectiveExp) {
                 
@@ -543,6 +564,7 @@ DdNode *initializeFirstBucket(DdManager *manager, Function *varMap, int varCount
             bucket->functions[actualSize] = opNode(NOT, varNodePtr, NULL, notBdd);
             // Insere na tabela hash de verificação
             st_insert(uniqueCheck, (char *)bucket->functions[actualSize]->bdd, (char *)bucket->functions[actualSize]->bdd);
+            //logExpressionToFile(bucket->functions[actualSize], 1);
             //Verifica se é solução
             if (bucket->functions[actualSize]->bdd == objectiveExp) 
             {
@@ -636,7 +658,6 @@ bool createCombinedBucket(DdManager *manager, Bucket *buckets, int numBuckets, i
                 #pragma omp parallel for collapse(2) schedule(dynamic) if(total_iterations > PARALLEL_MIN_COMBINATIONS)
                 for (int k = 0; k < b1->size; k++)
                 {
-                    /* Se buckets iguais, l começa de k: movido para o cabeçalho do for interno para manter os loops perfeitamente aninhados exigidos pelo collapse(2) */
                     for (int l = 0; l < b2->size; l++)
                     {
                         // Verifica se a flag de parada foi ativada
@@ -654,7 +675,7 @@ bool createCombinedBucket(DdManager *manager, Bucket *buckets, int numBuckets, i
                             DdNode *newBdd = NULL;
                             char opChar = (op == 0) ? '*' : '+';
                             //Crítico pois precisa acessar o manager, que é compartilhado
-                            #pragma omp critical(combine_bdds)
+                            #pragma omp critical(bdd_access)
                             {
                                 if(!stop)
                                 newBdd = combineBdds(manager, f1->bdd, f2->bdd, opChar);
@@ -697,20 +718,22 @@ bool createCombinedBucket(DdManager *manager, Bucket *buckets, int numBuckets, i
                             {
                                 bool inserted = false;
 
-                                #pragma omp critical(hash_insert)
+                                #pragma omp critical(bdd_access)
                                 {
-                                    st_insert(uniqueCheck, (char *)newBdd, (char *)newBdd);
+                                    if(st_insert(uniqueCheck, (char *)newBdd, (char *)newBdd) == 0){
+                                        // Novo BDD, pode inserir
+                                        Function *newFunction = opNode((opChar == '*') ? AND : OR, f1, f2, newBdd);
+                                        //logExpressionToFile(newFunction, targetOrder);
+                                        addFunctionToDynamicArray(newFunction, &newFunctions, &newFuncCount, &newFuncCapacity);
+                                        inserted = true;
+                                    }
                                     
-                                    Function *newFunction = opNode((opChar == '*') ? AND : OR, f1, f2, newBdd);
 
-                                
-                                    addFunctionToDynamicArray(newFunction, &newFunctions, &newFuncCount, &newFuncCapacity);
-                                    inserted = true;    
                                 }
                             
                                 if(!inserted)
                                 {
-                                    #pragma omp critical(deref_bdd)
+                                    #pragma omp critical(bdd_access)
                                     {
                                         Cudd_RecursiveDeref(manager, newBdd);
                                     }
@@ -719,7 +742,7 @@ bool createCombinedBucket(DdManager *manager, Bucket *buckets, int numBuckets, i
 
                             else
                             {
-                                #pragma omp critical(deref_bdd)
+                                #pragma omp critical(bdd_access)
                                 {
                                     Cudd_RecursiveDeref(manager, newBdd);
                                 }
@@ -814,3 +837,45 @@ void printFunction(Function* node) {
         if (parRight) printf(")");
     }
 }
+
+
+/*void fprintFunction(FILE *f, Function* node) {
+    if (node == NULL) return;
+
+    if (node->operador == VAR) { 
+        fprintf(f, "%c", node->varName);
+    } else if (node->operador == NOT) { 
+        fprintf(f, "!");
+        bool par = (node->left->operador != VAR && node->left->operador != NOT);
+        if(par) fprintf(f, "(");
+        fprintFunction(f, node->left);
+        if(par) fprintf(f, ")");
+    } else { // AND or OR
+        bool parLeft = (node->left->operador != VAR && node->left->operador != NOT && node->left->operador != node->operador);
+        if (parLeft) fprintf(f, "(");
+        fprintFunction(f, node->left);
+        if (parLeft) fprintf(f, ")");
+
+        fprintf(f, node->operador == AND ? "*" : "+");
+
+        bool parRight = (node->right->operador != VAR && node->right->operador != NOT && node->right->operador != node->operador);
+        if (parRight) fprintf(f, "(");
+        fprintFunction(f, node->right);
+        if (parRight) fprintf(f, ")");
+    }
+}
+
+void logExpressionToFile(Function *node, int ordem) {
+    // Abre em modo 'a' (append) para não sobrescrever
+    FILE *f = fopen("expressoes.log", "a"); 
+    if (f == NULL) {
+        perror("Erro ao abrir log");
+        return;
+    }
+    
+    fprintf(f, "[Ordem %d] ", ordem);
+    fprintFunction(f, node);
+    fprintf(f, "\n"); // Nova linha ao final da expressão
+    
+    fclose(f);
+}*/

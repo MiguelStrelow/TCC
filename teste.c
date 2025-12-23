@@ -76,9 +76,10 @@ void printImplementation(Implementation* node);
 int main(int argc, char *argv[])
 {
     time_t start = time(NULL);
-    if (argc < 2)
+    if (argc < 3)
     {
-        fprintf(stderr, "Uso: %s <expressão>\n", argv[0]);
+        fprintf(stderr, "Uso: %s <expressão> <modo>\n", argv[0]);
+        fprintf(stderr, "Modos disponíveis:\n e - parar ao encontrar equivalência\n c - completar o bucket final\n");
         return EXIT_FAILURE;
     }
     DdManager *manager = Cudd_Init(0, 0, CUDD_UNIQUE_SLOTS, CUDD_CACHE_SLOTS, 0);
@@ -96,7 +97,13 @@ int main(int argc, char *argv[])
         Cudd_Quit(manager);
         return EXIT_FAILURE;
     }
-    char choice;
+    char choice = argv[2][0];
+
+    if (choice != 'e' && choice != 'c') {
+        fprintf(stderr, "Erro: Modo inválido '%c'. Use 'e' ou 'c'.\n", choice);
+        return EXIT_FAILURE;
+    }
+
     int numBuckets = 0;
     bool found = false;
     //Declarar localmente na firstBucket
@@ -145,8 +152,6 @@ int main(int argc, char *argv[])
     {
         buckets = addBucket(buckets, &numBuckets);
     }
-        printf("Parar ao encontrar equivalencia, ou completar o bucket? (e/c): ");
-        scanf(" %c", &choice);  
     for (int order = 2; order <= varCount+1; order++)
     {
   
