@@ -4,7 +4,7 @@
 #include <string.h>
 #include <cudd.h>
 #include <st.h>
-#include <time.h> 
+#include <omp.h> 
 
 typedef enum{
     VAR,
@@ -75,7 +75,8 @@ void printImplementation(Implementation* node);
 
 int main(int argc, char *argv[])
 {
-    time_t start = time(NULL);
+    
+
     if (argc < 3)
     {
         fprintf(stderr, "Uso: %s <expressão> <modo>\n", argv[0]);
@@ -139,7 +140,8 @@ int main(int argc, char *argv[])
     }
     Cudd_PrintDebug(manager, objectiveExp, varCount, 2);
 
-    // Inicializa o bucket 1
+    double start_time = omp_get_wtime();
+
     buckets = addBucket(buckets, &numBuckets);
     initializeFirstBucket(manager, varMap, varCount, &buckets[0], objectiveExp, &found, uniqueCheck);
     if (!found) {
@@ -166,45 +168,18 @@ int main(int argc, char *argv[])
         printf("Nenhuma equivalência encontrada até a ordem %d.\n", varCount);
     }
 
+    double end_time = omp_get_wtime();
+
     // Após o uso, libera a hash
     st_free_table(uniqueCheck);
 
-    /*
-    int numBuckets = 1; // começa com um bucket, de ordem 1
-    Bucket *buckets = (Bucket *)malloc(numBuckets * sizeof(Bucket));
-    if (buckets == NULL) {
-        fprintf(stderr, "Erro ao alocar memória para buckets.\n");
-        exit(EXIT_FAILURE);
-    }
-        parseInput(manager, argv[1], &buckets[0]);
-        printBucket(buckets[0]);
-        buckets[0].order = 1;
-        buckets[0].function = (char **)malloc(4 * sizeof(char *));
-        buckets[0].function[0] = strdup("A");
-        buckets[0].function[1] = strdup("B");
-        buckets[0].function[2] = strdup("C");
-        buckets[0].function[3] = NULL;
-        buckets[0].size = 3;
-        printBucket(buckets[0]);
 
-    buckets = addBucket(buckets, &numBuckets);
-
-    // Cria um novo bucket combinando o de ordem 1 com ele mesmo
-    combineBuckets(buckets[0], buckets[0], &buckets[1]);
-
-    printBucket(buckets[1]);
-    buckets = addBucket(buckets, &numBuckets);
-    combineBuckets(buckets[1], buckets[0], &buckets[2]);
-    printBucket(buckets[2]);
-    createCombinedBucket(buckets, numBuckets, 4);
-    printBucket(buckets[3]);
-    freeAll(buckets, numBuckets);*/
     Cudd_RecursiveDeref(manager, objectiveExp);
     freeAllBuckets(manager, buckets, numBuckets);
     free(varMap);
     Cudd_Quit(manager);
-    time_t end = time(NULL);
-    printf("Tempo total de execução: %ld segundos\n", end - start);
+
+    printf("BENCHMARK_TIME: %.6f\n", end_time - start_time);
     return 0;
 }
 
@@ -781,12 +756,15 @@ bool createCombinedBucket(DdManager *manager, Bucket *buckets, int numBuckets, i
                             if (newBdd == objectiveExp && choice == 'e')
                             {
                                 printf("\n!!! EQUIVALÊNCIA ENCONTRADA (Ordem %d) !!!\n", targetOrder);
+    
+                                printf("RESULTADO_LITERAIS: %d\n", targetOrder);
                                 
                                 Implementation *temp = opNode((opChar == '*') ? AND : OR, f1->impRoot, f2->impRoot); 
+                                printf("RESULTADO_EXPRESSAO: ");
                                 printImplementation(temp);
                                 printf("\n");
 
-                                printf("No de literais: %d\n", targetOrder);
+
                                 
                                 // Limpa o que foi alocado temporariamente e retorna true
                                 free(temp);

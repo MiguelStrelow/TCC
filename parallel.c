@@ -1,4 +1,3 @@
-#define _POSIX_C_SOURCE 199309L
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
@@ -110,12 +109,7 @@ void printFunction(Function* node);
 
 int main(int argc, char *argv[])
 {
-    struct timespec tstart = {0,0}, tend = {0,0};
-
-    if (clock_gettime(CLOCK_MONOTONIC, &tstart) != 0) {
-        perror("Erro em clock_gettime start");
-        return EXIT_FAILURE;
-    }
+    
 
     //A princípio toda a primeira parte da execução é sequencial, paralelizar iria gerar overhead desnecessário
     if (argc < 3)
@@ -170,6 +164,8 @@ int main(int argc, char *argv[])
     Bucket *buckets = NULL;
     // Parseia a expressão de entrada e obtém o BDD resultante
     DdNode *objectiveExp = parseInputExpression(manager, argv[1], &varMap, &varCount, &literalCount);
+    
+    
     if (objectiveExp == NULL)
     {
         fprintf(stderr, "Erro ao parsear a expressão.\n");
@@ -195,6 +191,9 @@ int main(int argc, char *argv[])
         return EXIT_SUCCESS;
     }
     Cudd_PrintDebug(manager, objectiveExp, varCount, 2);
+    
+     //Iniciar aqui para levar em conta apenas o algoritmo
+    double start_time = omp_get_wtime();
 
     // Inicializa o bucket 1
     buckets = addBucket(buckets, &numBuckets);
@@ -223,6 +222,9 @@ int main(int argc, char *argv[])
     if (!found) {
         printf("Nenhuma equivalência encontrada até a ordem %d.\n", varCount);
     }
+    
+    //Acaba aqui, liberar a memória não faz parte do algoritmo
+    double end_time = omp_get_wtime();
 
     // Após o uso, libera a hash
     // Vou ter que rever todos os frees mais pra frente
@@ -241,16 +243,7 @@ int main(int argc, char *argv[])
 
     Cudd_Quit(manager);
 
-    if (clock_gettime(CLOCK_MONOTONIC, &tend) != 0) {
-        perror("Erro em clock_gettime end");
-        return EXIT_FAILURE;
-    }
-
-    double time_taken;
-    time_taken = (double)(tend.tv_sec - tstart.tv_sec) + 
-                 (double)(tend.tv_nsec - tstart.tv_nsec) / 1.0e9;
-
-    printf("Tempo total de execução: %.6f segundos\n", time_taken);
+    printf("BENCHMARK_TIME: %.6f\n", end_time - start_time);
     return 0;
 }
 
@@ -729,16 +722,20 @@ bool createCombinedBucket(DdManager *manager, Bucket *buckets, int numBuckets, i
                                         stop = true; // Ativa a flag de parada
                                     
                                         printf("\n!!! EQUIVALÊNCIA ENCONTRADA (Ordem %d) !!!\n", targetOrder);
+
+                                        // Prefixo para facilitar o grep no script
+                                        printf("RESULTADO_LITERAIS: %d\n", targetOrder);
                                 
                                         Function tempNode;
                                         tempNode.operador = (opChar == '*') ? AND : OR;
                                         tempNode.left = f1;
                                         tempNode.right = f2;
                                         tempNode.varName = '\0';
+                                        
+
+                                        printf("RESULTADO_EXPRESSAO: ");
                                         printFunction(&tempNode); 
-
-
-                                        printf("\nNo de literais: %d\n", targetOrder);
+                                        printf("\n"); // Nova linha obrigatória após a expressão recursiva
                                 
                                     }
                                 }

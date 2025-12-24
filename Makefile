@@ -10,7 +10,7 @@ EXEC1 = parallel
 EXEC2 = teste
 
 # Flags do Compilador
-CFLAGS = -g -Wall -D_POSIX_C_SOURCE=199309L\
+CFLAGS = -g -Wall \
     -I$(CUDD_PREFIX)/epd/include \
     -I$(CUDD_PREFIX)/st
 	
