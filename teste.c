@@ -13,18 +13,13 @@ typedef enum{
     OR
 } OpType;
 
-typedef struct Implementation
-{
-    OpType operador; // 0 p/ var, 1 p/ not, 2 p/ and, 3 p/ or -> Substituido por enum pra ficar mais claro
-    char varName; //Apenas se operador == 0
-    struct Implementation *left;
-    struct Implementation *right;
-} Implementation;
-
-typedef struct
+typedef struct Function
 {
     DdNode *bdd;
-    Implementation *impRoot;
+    struct Function *left;
+    struct Function *right;
+    OpType operador;
+    char varName; //Apenas se operador == VAR
 } Function;
 
 typedef struct
@@ -33,6 +28,14 @@ typedef struct
     int order;
     int size;
 } Bucket;
+
+typedef struct {
+    Function *f1;
+    Function *f2;
+    DdNode *bdd;
+    char op;
+} CombinationBuffer;
+
 
 
 
@@ -67,11 +70,11 @@ DdNode *combineBdds(DdManager *manager, DdNode *bdd1, DdNode *bdd2, char operato
 // Função para criar um novo bucket de ordem l realizando todas as combinações possíveis entre todos os buckets de ordem n + m = l
 bool createCombinedBucket(DdManager *manager, Bucket *buckets, int numBuckets, int targetOrder, DdNode *objectiveExp, st_table *uniqueCheck, char choice);
 // Criar um novo nó caso seja variável
-Implementation* varNode(char varName);
+Function* varNode(char varName, DdNode *bdd);
 //Criar um novo nó caso seja operador
-Implementation* opNode(OpType operador, Implementation* left, Implementation* right);
+Function* opNode(OpType operador, Function* left, Function* right, DdNode *bdd);
 //Printar a implementação
-void printImplementation(Implementation* node);
+void printFunction(Function* node);
 
 int main(int argc, char *argv[])
 {
@@ -114,6 +117,7 @@ int main(int argc, char *argv[])
     Bucket *buckets = NULL;
     // Parseia a expressão de entrada e obtém o BDD resultante
     DdNode *objectiveExp = parseInputExpression(manager, argv[1], &varMap, &varCount, &literalCount);
+    printf("literalCount: %d\n", literalCount);
     if (objectiveExp == NULL)
     {
         fprintf(stderr, "Erro ao parsear a expressão.\n");
@@ -150,11 +154,11 @@ int main(int argc, char *argv[])
     printBucket(manager, buckets[0], varCount);
 
     // Inicializa todos os buckets que poderão ser usados nesta execução do programa
-    while (numBuckets < varCount)
+    while (numBuckets < literalCount)
     {
         buckets = addBucket(buckets, &numBuckets);
     }
-    for (int order = 2; order <= varCount+1; order++)
+    for (int order = 2; order <= literalCount; order++)
     {
   
         found = createCombinedBucket(manager, buckets, numBuckets, order, objectiveExp, uniqueCheck, choice);
@@ -165,7 +169,7 @@ int main(int argc, char *argv[])
     }
     }
     if (!found) {
-        printf("Nenhuma equivalência encontrada até a ordem %d.\n", varCount);
+        printf("Nenhuma equivalência encontrada até a ordem %d.\n", literalCount);
     }
 
     double end_time = omp_get_wtime();
@@ -176,7 +180,16 @@ int main(int argc, char *argv[])
 
     Cudd_RecursiveDeref(manager, objectiveExp);
     freeAllBuckets(manager, buckets, numBuckets);
-    free(varMap);
+
+    if (varMap != NULL) {
+        for (int i = 0; i < varCount; i++) {
+            if (varMap[i].bdd) {
+                Cudd_RecursiveDeref(manager, varMap[i].bdd);
+            }
+        }
+        free(varMap);
+    }
+
     Cudd_Quit(manager);
 
     printf("BENCHMARK_TIME: %.6f\n", end_time - start_time);
@@ -261,7 +274,7 @@ void printBucket(DdManager *manager, Bucket bucket, int varCount)
         for (int i = 0; i < bucket.size; i++)
         {
             printf("  Function[%d]:", i);
-            printImplementation(bucket.functions[i]->impRoot);
+            printFunction(bucket.functions[i]);
             printf("\n");
             //Cudd_PrintDebug(manager, bucket.functions[i], varCount, 2);
         }
@@ -296,17 +309,11 @@ void freeAllBuckets(DdManager *manager, Bucket *buckets, int numBuckets)
             {
                 if (buckets[i].functions[j] != NULL)
                 {
-                    //Deferecia o BDD
-                    Cudd_RecursiveDeref(manager, buckets[i].functions[j]->bdd);
                     
-                    //Libera o nó de implementação
-                    //Primeiro verifica se é NOT. Se sim, libera o filho esquerdo antes
-                    if(buckets[i].functions[j]->impRoot->operador == NOT) {
-                        free(buckets[i].functions[j]->impRoot->left);
+                    if (buckets[i].functions[j]->bdd) {
+                        Cudd_RecursiveDeref(manager, buckets[i].functions[j]->bdd);
                     }
-                    free(buckets[i].functions[j]->impRoot);
 
-                    //Libera a struct
                     free(buckets[i].functions[j]);
                 }
             }
@@ -367,7 +374,7 @@ DdNode *evaluatePostfix(DdManager *manager, char **postfix, int count, Function 
             DdNode *varBdd = NULL;
             for (int j = 0; j < varCount; j++)
             {
-                if (varMap[j].impRoot->varName == token[0])
+                if (varMap[j].varName == token[0])
                 {
                     varBdd = varMap[j].bdd;
                     break;
@@ -451,20 +458,24 @@ DdNode *parseInputExpression(DdManager *manager, const char *input, Function **o
 
         if (c >= 'A' && c <= 'Z')
         {
-            literalCount++;
+            (*literalCount)++;
              // Se é uma variável
             // Adiciona a variável ao nosso mapa se for nova
             bool found = false;
             for (int j = 0; j < var_count; j++)
             {
-                if (local_var_map[j].impRoot->varName == c)
+                if (local_var_map[j].varName == c)
                     found = true;
             }
             if (!found)
             {
-                //local_var_map[var_count].impRoot->varName = strdup(&c);
-                local_var_map[var_count].impRoot = varNode(c);
+                
+                local_var_map[var_count].operador = VAR;
+                local_var_map[var_count].varName = c;
+                local_var_map[var_count].left = NULL;
+                local_var_map[var_count].right = NULL;
                 local_var_map[var_count].bdd = Cudd_bddIthVar(manager, var_count);
+                Cudd_Ref(local_var_map[var_count].bdd);
                 printf("Criada variável BDD %d para '%c'\n", var_count, c);
                 var_count++;
             }
@@ -589,7 +600,7 @@ DdNode *parseInputExpression(DdManager *manager, const char *input, Function **o
             if (bucket->functions[actualSize]->bdd == objectiveExp) {
                  printf("Solução Encontrada (Ordem 1):" );
 
-                 printImplementation(bucket->functions[actualSize]->impRoot);
+                 printFunction(bucket->functions[actualSize]->impRoot);
                  printf("\n");
                 *found = true;
             }
@@ -609,7 +620,6 @@ DdNode *initializeFirstBucket(DdManager *manager, Function *varMap, int varCount
     if (bucket->functions == NULL) exit(EXIT_FAILURE);
 
     int actualSize = 0;
-    char varStr[2] = {'\0', '\0'};
     
     for (int i = 0; i < varCount; i++)
     {
@@ -630,39 +640,48 @@ DdNode *initializeFirstBucket(DdManager *manager, Function *varMap, int varCount
         }
 
         // Verifica Unicidade
-        bool isPosUnate = !Cudd_bddLeq(manager, cofPos, cofNeg); 
-        bool isNegUnate = !Cudd_bddLeq(manager, cofNeg, cofPos);
-
+        bool isPosUnate = Cudd_bddLeq(manager, cofNeg, cofPos); 
+        bool isNegUnate = Cudd_bddLeq(manager, cofPos, cofNeg);
+        bool isBinate = !isPosUnate && !isNegUnate;
 
         Cudd_RecursiveDeref(manager, cofPos);
         Cudd_RecursiveDeref(manager, cofNeg);
 
-        // Adiciona se NÃO for estritamente negativa
-        if (!isNegUnate) {
-            bucket->functions[actualSize] = (Function *)malloc(sizeof(Function));
-            varStr[0] = varMap[i].impRoot->varName;
-            bucket->functions[actualSize]->impRoot = varNode(varStr[0]);
-            bucket->functions[actualSize]->bdd = varMap[i].bdd;
-            Cudd_Ref(bucket->functions[actualSize]->bdd);
+        // Adiciona se for positivo unate ou binate
+        if (isPosUnate || isBinate) {
+            Cudd_Ref(varMap[i].bdd);
+            // Cria o nó da função
+            bucket->functions[actualSize] = varNode(varMap[i].varName, varMap[i].bdd);
+            // Insere na tabela hash de verificação
             st_insert(uniqueCheck, (char *)bucket->functions[actualSize]->bdd, (char *)bucket->functions[actualSize]->bdd);
+            //logExpressionToFile(bucket->functions[actualSize], 1);
+            //Verifica se é solução
             if (bucket->functions[actualSize]->bdd == objectiveExp) {
                 
-                printf("Solução Encontrada (Ordem 1): %c\n", bucket->functions[actualSize]->impRoot->varName);
+                printf("Solução Encontrada (Ordem 1): ");
+                printFunction(bucket->functions[actualSize]);
                 *found = true;
             }
             actualSize++;
         }
 
-        // Adiciona se NÃO for estritamente positiva
-        if (!isPosUnate) {
-            bucket->functions[actualSize] = (Function *)malloc(sizeof(Function));
-            bucket->functions[actualSize]->impRoot = opNode(NOT, varNode(varMap[i].impRoot->varName), NULL);
-            bucket->functions[actualSize]->bdd = Cudd_Not(varMap[i].bdd);
-            Cudd_Ref(bucket->functions[actualSize]->bdd);
+        // Adiciona se for negativo unate ou binate
+        if (isNegUnate || isBinate) {
+            // Temporário para o BDD negado
+            DdNode *notBdd = Cudd_Not(varMap[i].bdd);
+            Cudd_Ref(notBdd);
+            Function *varNodePtr = varNode(varMap[i].varName, varMap[i].bdd);
+            Cudd_Ref(varMap[i].bdd);
+            // Cria o nó da função
+            bucket->functions[actualSize] = opNode(NOT, varNodePtr, NULL, notBdd);
+            // Insere na tabela hash de verificação
             st_insert(uniqueCheck, (char *)bucket->functions[actualSize]->bdd, (char *)bucket->functions[actualSize]->bdd);
-            if (bucket->functions[actualSize]->bdd == objectiveExp) {
+            //logExpressionToFile(bucket->functions[actualSize], 1);
+            //Verifica se é solução
+            if (bucket->functions[actualSize]->bdd == objectiveExp) 
+            {
                 printf("Solução Encontrada (Ordem 1): ");
-                printImplementation(bucket->functions[actualSize]->impRoot);
+                printFunction(bucket->functions[actualSize]);
                 printf("\n");
                 *found = true;
             }
@@ -674,6 +693,7 @@ DdNode *initializeFirstBucket(DdManager *manager, Function *varMap, int varCount
     printf("Primeiro bucket inicializado com %d funções.\n", actualSize);
     return NULL;
 }
+
 
 
 DdNode *combineBdds(DdManager *manager, DdNode *bdd1, DdNode *bdd2, char operator)
@@ -725,88 +745,82 @@ bool createCombinedBucket(DdManager *manager, Bucket *buckets, int numBuckets, i
     Function **newFunctions = NULL;
     int newFuncCount = 0;
     int newFuncCapacity = 0;
-
-    for (int i = 0; i < numBuckets; i++)
+    for (int i = 0; i < targetOrder - 1; i++)
     {
-        int order1 = buckets[i].order; 
+        int order1 = buckets[i].order;
         int order2 = targetOrder - order1;
         if (order2 < order1) break; // Evita repetições desnecessárias
         int j = order2 - 1;
-        
-                Bucket *b1 = &buckets[i];
-                Bucket *b2 = &buckets[j];
 
-                for (int k = 0; k < b1->size; k++)
+        if (!(buckets[i].order > 0) && !(buckets[j].order > 0) && !(buckets[i].order + buckets[j].order == targetOrder)) continue;
+        Bucket *b1 = &buckets[i];
+        Bucket *b2 = &buckets[j];
+        printf("Combinando buckets de ordem %d e %d para formar ordem %d\n", b1->order, b2->order, targetOrder);
+
+        if (b1->size == 0 || b2->size == 0) continue;
+
+        for (int k = 0; k < b1->size; k++)
+        {
+            int startL = (i == j) ? k : 0;
+            for (int l = startL; l < b2->size; l++)
+            {
+                Function *f1 = b1->functions[k];
+                Function *f2 = b2->functions[l];
+
+                for (int op = 0; op < 2; op++)
                 {
-                    // Se buckets iguais, l começa de k
-                    int startL = (i == j) ? k : 0;
-                    
-                    for (int l = startL; l < b2->size; l++)
-                    {
-                        Function *f1 = b1->functions[k];
-                        Function *f2 = b2->functions[l];
-                        
-                        for (int op = 0; op < 2; op++)
-                        {
-                            DdNode *newBdd;
-                            char opChar = (op == 0) ? '*' : '+';
-                            newBdd = combineBdds(manager, f1->bdd, f2->bdd, opChar);
+                    DdNode *newBdd;
+                    char opChar = (op == 0) ? '*' : '+';
+                    newBdd = combineBdds(manager, f1->bdd, f2->bdd, opChar);
 
-                            //Parada imediata caso encontre equivalência
-                            if (newBdd == objectiveExp && choice == 'e')
-                            {
-                                printf("\n!!! EQUIVALÊNCIA ENCONTRADA (Ordem %d) !!!\n", targetOrder);
-    
-                                printf("RESULTADO_LITERAIS: %d\n", targetOrder);
-                                
-                                Implementation *temp = opNode((opChar == '*') ? AND : OR, f1->impRoot, f2->impRoot); 
-                                printf("RESULTADO_EXPRESSAO: ");
-                                printImplementation(temp);
-                                printf("\n");
+                    if (newBdd == NULL) continue;
 
+                    if (newBdd == Cudd_ReadLogicZero(manager) || newBdd == Cudd_ReadOne(manager)) {
+                        Cudd_RecursiveDeref(manager, newBdd);
+                        continue;
+                    }
 
-                                
-                                // Limpa o que foi alocado temporariamente e retorna true
-                                free(temp);
-                                free(newFunctions); // Limpa o array parcial se houver
-                                return true; 
-                            }
+                    // Parada imediata caso encontre equivalência
+                    if (newBdd == objectiveExp && choice == 'e') {
+                        printf("\n!!! EQUIVALÊNCIA ENCONTRADA (Ordem %d) !!!\n", targetOrder);
+                        printf("RESULTADO_LITERAIS: %d\n", targetOrder);
+                        Function *temp = opNode((opChar == '*') ? AND : OR, f1, f2, newBdd);
+                        printf("RESULTADO_EXPRESSAO: ");
+                        printFunction(temp);
+                        printf("\n");
+                        free(temp);
+                        free(newFunctions);
+                        Cudd_RecursiveDeref(manager, newBdd);
+                        return true;
+                    }
 
-                            if (st_lookup(uniqueCheck, (char *)newBdd, NULL) == 0 && newBdd != Cudd_ReadLogicZero(manager))
-                            {
-
-                                Function *newFunction = (Function *)malloc(sizeof(Function));
-                                newFunction->bdd = newBdd;
-                                newFunction->impRoot = opNode((opChar == '*') ? AND : OR, f1->impRoot, f2->impRoot);
-
-                                st_insert(uniqueCheck, (char *)newBdd, (char *)newBdd);
-                                addFunctionToDynamicArray(newFunction, &newFunctions, &newFuncCount, &newFuncCapacity);
-                            }
-                            else
-                            {
-                                Cudd_RecursiveDeref(manager, newBdd);
-                            }
-                        }
+                    if (st_lookup(uniqueCheck, (char *)newBdd, NULL) == 0) {
+                        Function *newFunction = opNode((opChar == '*') ? AND : OR, f1, f2, newBdd);
+                        st_insert(uniqueCheck, (char *)newBdd, (char *)newBdd);
+                        addFunctionToDynamicArray(newFunction, &newFunctions, &newFuncCount, &newFuncCapacity);
+                    } else {
+                        Cudd_RecursiveDeref(manager, newBdd);
                     }
                 }
             }
+        }
+    }
 
     targetBucket->order = targetOrder;
     targetBucket->size = newFuncCount;
 
     if (newFuncCount > 0) {
-        // Não sei se precisa, mas economiza um pouco de memória
         targetBucket->functions = newFunctions;
     } else {
         free(newFunctions);
         targetBucket->functions = NULL;
     }
-    
+
     // Verifica array final se a opção não era saída imediata
     for (int i = 0; i < newFuncCount; i++) {
         if (newFunctions[i]->bdd == objectiveExp) {
             printf("\n!!! EQUIVALÊNCIA ENCONTRADA (Ordem %d) !!!\n", targetOrder);
-            printImplementation(newFunctions[i]->impRoot);
+            printFunction(newFunctions[i]);
             printf("\n");
             printf("No de literais: %d\n", targetOrder);
             return true;
@@ -816,8 +830,9 @@ bool createCombinedBucket(DdManager *manager, Bucket *buckets, int numBuckets, i
     return false;
 }
 
-Implementation* varNode(char varName) {
-    Implementation* node = (Implementation*)malloc(sizeof(Implementation));
+Function* varNode(char varName, DdNode *bdd) {
+    Function* node = (Function*)malloc(sizeof(Function));
+    node->bdd = bdd;
     node->operador = VAR; // variável
     node->varName = varName;
     node->left = NULL;
@@ -825,8 +840,9 @@ Implementation* varNode(char varName) {
     return node;
 }
 
-Implementation* opNode(OpType operador, Implementation* left, Implementation* right) {
-    Implementation* node = (Implementation*)malloc(sizeof(Implementation));
+Function* opNode(OpType operador, Function* left, Function* right, DdNode *bdd) {
+    Function* node = (Function*)malloc(sizeof(Function));
+    node->bdd = bdd;
     node->operador = operador; // 1 p/ not, 2 p/ and, 3 p/ or
     node->varName = '\0'; // não usado para operadores
     node->left = left;
@@ -834,7 +850,7 @@ Implementation* opNode(OpType operador, Implementation* left, Implementation* ri
     return node;
 }
 
-void printImplementation(Implementation* node) {
+void printFunction(Function* node) {
     if (node == NULL) return;
 
     if (node->operador == VAR) { 
@@ -844,13 +860,13 @@ void printImplementation(Implementation* node) {
         // Parenthesis check for NOT
         bool par = (node->left->operador != VAR && node->left->operador != NOT);
         if(par) printf("(");
-        printImplementation(node->left);
+        printFunction(node->left);
         if(par) printf(")");
     } else { // AND or OR
         // Check priority for Left Child
         bool parLeft = (node->left->operador != VAR && node->left->operador != NOT && node->left->operador != node->operador);
         if (parLeft) printf("(");
-        printImplementation(node->left);
+        printFunction(node->left);
         if (parLeft) printf(")");
 
         printf(node->operador == AND ? "*" : "+");
@@ -858,7 +874,7 @@ void printImplementation(Implementation* node) {
         // Check priority for Right Child
         bool parRight = (node->right->operador != VAR && node->right->operador != NOT && node->right->operador != node->operador);
         if (parRight) printf("(");
-        printImplementation(node->right);
+        printFunction(node->right);
         if (parRight) printf(")");
     }
 }
