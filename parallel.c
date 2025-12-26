@@ -164,7 +164,7 @@ int main(int argc, char *argv[])
     Bucket *buckets = NULL;
     // Parseia a expressão de entrada e obtém o BDD resultante
     DdNode *objectiveExp = parseInputExpression(manager, argv[1], &varMap, &varCount, &literalCount);
-    
+    printf("literalCount: %d\n", literalCount);
     
     if (objectiveExp == NULL)
     {
@@ -204,11 +204,11 @@ int main(int argc, char *argv[])
     printBucket(manager, buckets[0], varCount);
 
     // Inicializa todos os buckets que poderão ser usados nesta execução do programa
-    while (numBuckets < varCount)
+    while (numBuckets < literalCount)
     {
         buckets = addBucket(buckets, &numBuckets);
     }
-    for (int order = 2; order <= varCount+1; order++)
+    for (int order = 2; order <= literalCount; order++)
     {
         //Aqui começa a parte paralela
         //Dentro da função, quero que cada thread trate de combinar buckets diferentes
@@ -220,7 +220,7 @@ int main(int argc, char *argv[])
     }
     }
     if (!found) {
-        printf("Nenhuma equivalência encontrada até a ordem %d.\n", varCount);
+        printf("Nenhuma equivalência encontrada até a ordem %d.\n", literalCount);
     }
     
     //Acaba aqui, liberar a memória não faz parte do algoritmo
@@ -432,7 +432,7 @@ DdNode *parseInputExpression(DdManager *manager, const char *input, Function **o
 
         if (c >= 'A' && c <= 'Z')
         {
-            literalCount++;
+            (*literalCount)++;
              // Se é uma variável
             // Adiciona a variável ao nosso mapa se for nova
             bool found = false;
@@ -542,15 +542,15 @@ DdNode *initializeFirstBucket(DdManager *manager, Function *varMap, int varCount
         }
 
         // Verifica Unicidade
-        bool isPosUnate = !Cudd_bddLeq(manager, cofPos, cofNeg); 
-        bool isNegUnate = !Cudd_bddLeq(manager, cofNeg, cofPos);
-
+        bool isPosUnate = Cudd_bddLeq(manager, cofNeg, cofPos); 
+        bool isNegUnate = Cudd_bddLeq(manager, cofPos, cofNeg);
+        bool isBinate = !isPosUnate && !isNegUnate;
 
         Cudd_RecursiveDeref(manager, cofPos);
         Cudd_RecursiveDeref(manager, cofNeg);
 
-        // Adiciona se NÃO for estritamente negativa
-        if (!isNegUnate) {
+        // Adiciona se for positivo unate ou binate
+        if (isPosUnate || isBinate) {
             Cudd_Ref(varMap[i].bdd);
             // Cria o nó da função]
             bucket->functions[actualSize] = varNode(varMap[i].varName, varMap[i].bdd);
@@ -567,8 +567,8 @@ DdNode *initializeFirstBucket(DdManager *manager, Function *varMap, int varCount
             actualSize++;
         }
 
-        // Adiciona se NÃO for estritamente positiva
-        if (!isPosUnate) {
+        // Adiciona se for negativo unate ou binate
+        if (isNegUnate || isBinate) {
             // Temporário para o BDD negado
             DdNode *notBdd = Cudd_Not(varMap[i].bdd);
             Cudd_Ref(notBdd);
@@ -649,16 +649,19 @@ bool createCombinedBucket(DdManager *manager, Bucket *buckets, int numBuckets, i
 
     bool stop = false;
 
-    for (int i = 0; i < numBuckets; i++)
+    for (int i = 0; i < targetOrder-1; i++)
     {
         int order1 = buckets[i].order; 
         int order2 = targetOrder - order1;
         if (order2 < order1) break; // Evita repetições desnecessárias
         int j = order2 - 1;
-        
+        if (!(buckets[i].order > 0) && !(buckets[j].order > 0) && 
+                !(buckets[i].order + buckets[j].order == targetOrder)) continue;
                 Bucket *b1 = &buckets[i];
                 Bucket *b2 = &buckets[j];
-                
+                printf("Combinando buckets de ordem %d e %d para formar ordem %d\n", b1->order, b2->order, targetOrder);
+
+                 #pragma omp flush(stop)
                 if (stop) break; // Sai do loop se a flag de parada foi ativada na iteração passada
 
                 if (b1->size == 0 || b2->size == 0) continue;
@@ -823,7 +826,7 @@ bool createCombinedBucket(DdManager *manager, Bucket *buckets, int numBuckets, i
         free(newFunctions);
         targetBucket->functions = NULL;
     }
-    
+    printBucket(manager, *targetBucket, 0);
     // Verifica array final se a opção não era saída imediata
     for (int i = 0; i < newFuncCount; i++) {
         if (newFunctions[i]->bdd == objectiveExp) {
