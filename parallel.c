@@ -9,7 +9,8 @@
 //Eventualmente pode ser explorado o uso de MPI, para uma abordagem distribuída, mas isso seria um próximo trabalho. 
 #include <omp.h>
 
-
+double global_total_time = 0.0;   // Tempo Fora (Espera + Serviço)
+double global_service_time = 0.0;
 #define PARALLEL_MIN_COMBINATIONS 3000
 #define BATCH_SIZE 128
 /* Iniciando a versão paralela do código. A partir daqui, não temos mais guias. O primeiro passo seria localizar os pontos críticos que podem gerar
@@ -194,6 +195,7 @@ int main(int argc, char *argv[])
     
      //Iniciar aqui para levar em conta apenas o algoritmo
     double start_time = omp_get_wtime();
+    clock_t start_clock = clock();
 
     // Inicializa o bucket 1
     buckets = addBucket(buckets, &numBuckets);
@@ -225,6 +227,7 @@ int main(int argc, char *argv[])
     
     //Acaba aqui, liberar a memória não faz parte do algoritmo
     double end_time = omp_get_wtime();
+    clock_t end_clock = clock();
 
     // Após o uso, libera a hash
     // Vou ter que rever todos os frees mais pra frente
@@ -242,8 +245,15 @@ int main(int argc, char *argv[])
     }
 
     Cudd_Quit(manager);
+    double wait_time = global_total_time - global_service_time;
+    double cpu_time_used = ((double) (end_clock - start_clock)) / CLOCKS_PER_SEC; 
 
     printf("BENCHMARK_TIME: %.6f\n", end_time - start_time);
+    printf("RESULTADO_CLOCK_TIME: %.6f\n", cpu_time_used);
+    printf("RESULTADO_SERVICE_TIME: %.6f\n", global_service_time); // Tempo útil
+    printf("RESULTADO_WAIT_TIME: %.6f\n", wait_time); // Tempo de espera
+
+
     return 0;
 }
 
@@ -674,6 +684,9 @@ bool createCombinedBucket(DdManager *manager, Bucket *buckets, int numBuckets, i
                 //if() define que só paralelize trabalho que compense o overhead (Valor estimado com base em testes)
                 #pragma omp parallel if(total_iterations > PARALLEL_MIN_COMBINATIONS)
                 {
+                    // Para calcular o tempo gasto em travas
+                    double local_total_time = 0.0;
+                    double local_service_time = 0.0;
                     //Vou aplicar batching pra diminuir o overhead de criação de threads e mudança de contexto
                     CombinationBuffer buffer[BATCH_SIZE];
                     int buffer_count = 0;
@@ -698,13 +711,23 @@ bool createCombinedBucket(DdManager *manager, Bucket *buckets, int numBuckets, i
 
                             DdNode *newBdd = NULL;
                             char opChar = (op == 0) ? '*' : '+';
-
+                            
+                            // Medir o tempo gasto dentro do critical, apenas para combinar bdds
+                           double t_out_start = omp_get_wtime();
                             //Crítico pois precisa acessar o manager, que é compartilhado
+                           
                             #pragma omp critical(bdd_access)
                             {
+                                double t_in_start = omp_get_wtime();
                                 if(!stop)
                                 newBdd = combineBdds(manager, f1->bdd, f2->bdd, opChar);
+                                double t_in_end = omp_get_wtime();
+                                local_service_time += (t_in_end - t_in_start);
                             }
+
+                            double t_out_end = omp_get_wtime();
+                            local_total_time += (t_out_end - t_out_start);
+
                             if (newBdd == NULL) continue; //Caso tenha parado dentro do critical
                             
 
@@ -802,8 +825,15 @@ bool createCombinedBucket(DdManager *manager, Bucket *buckets, int numBuckets, i
                 }
                 buffer_count = 0;
             }
+            #pragma omp atomic
+            global_total_time += local_total_time;
+
+            #pragma omp atomic
+            global_service_time += local_service_time;
         } // Fim do parallel region
+
     }
+
 
             if(stop){
                 //Limpar o que foi alocado
