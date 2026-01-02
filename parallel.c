@@ -12,7 +12,7 @@
 double global_total_time = 0.0;   // Tempo Fora (Espera + Serviço)
 double global_service_time = 0.0;
 #define PARALLEL_MIN_COMBINATIONS 3000
-#define BATCH_SIZE 128
+#define BATCH_SIZE 256
 /* Iniciando a versão paralela do código. A partir daqui, não temos mais guias. O primeiro passo seria localizar os pontos críticos que podem gerar
 condições de corrida. Vou fazer isso analisando novamente o código. Como o CUDD não é uma biblioteca thread-safe, vai dar um trabalhão, e o ganho
 pode acabar não sendo tão grande quanto esperado inicialmente, mas agora não dá tempo de mudar :) 
@@ -856,7 +856,7 @@ bool createCombinedBucket(DdManager *manager, Bucket *buckets, int numBuckets, i
         free(newFunctions);
         targetBucket->functions = NULL;
     }
-    printBucket(manager, *targetBucket, 0);
+    //printBucket(manager, *targetBucket, 0);
     // Verifica array final se a opção não era saída imediata
     for (int i = 0; i < newFuncCount; i++) {
         if (newFunctions[i]->bdd == objectiveExp) {
