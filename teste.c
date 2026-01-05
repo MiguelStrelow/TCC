@@ -150,7 +150,6 @@ int main(int argc, char *argv[])
     initializeFirstBucket(manager, varMap, varCount, &buckets[0], objectiveExp, &found, uniqueCheck);
     if (!found) {
 
-    printf("--- Bucket 1 (Ordem %d, Tamanho %d) ---\n", buckets[0].order, buckets[0].size);
     printBucket(manager, buckets[0], varCount);
 
     // Inicializa todos os buckets que poderão ser usados nesta execução do programa
@@ -163,7 +162,6 @@ int main(int argc, char *argv[])
   
         found = createCombinedBucket(manager, buckets, numBuckets, order, objectiveExp, uniqueCheck, choice);
         if (found) break; // Sai do loop se encontrou a equivalência
-        printf("--- Bucket %d (Ordem %d, Tamanho %d) ---\n", order, buckets[order - 1].order, buckets[order - 1].size);
         //printBucket(manager, buckets[order - 1], varCount);
         
     }
@@ -755,7 +753,6 @@ bool createCombinedBucket(DdManager *manager, Bucket *buckets, int numBuckets, i
         if (!(buckets[i].order > 0) && !(buckets[j].order > 0) && !(buckets[i].order + buckets[j].order == targetOrder)) continue;
         Bucket *b1 = &buckets[i];
         Bucket *b2 = &buckets[j];
-        printf("Combinando buckets de ordem %d e %d para formar ordem %d\n", b1->order, b2->order, targetOrder);
 
         if (b1->size == 0 || b2->size == 0) continue;
 

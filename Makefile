@@ -8,6 +8,7 @@ CUDD_PREFIX = /home/miguel/cudd_installation/cudd
 # Nomes dos executáveis que queremos gerar
 EXEC1 = parallel
 EXEC2 = teste
+EXEC3 = parallel2
 
 # Flags do Compilador
 CFLAGS = -g -Wall \
@@ -25,7 +26,7 @@ LDLIBS = -fopenmp -lcudd -lm
 .PHONY: all clean run run_teste debug
 
 # Target padrão: compila TODOS os executáveis listados
-all: $(EXEC1) $(EXEC2)
+all: $(EXEC1) $(EXEC2) $(EXEC3)
 
 # --- REGRAS DE COMPILAÇÃO ---
 

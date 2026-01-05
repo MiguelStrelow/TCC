@@ -10,7 +10,7 @@
 double global_total_time = 0.0;   // Tempo Fora (Espera + Serviço)
 double global_service_time = 0.0;
 #define PARALLEL_MIN_COMBINATIONS 3000
-#define BATCH_SIZE 256
+#define BATCH_SIZE 2048
 #define QUEUE_SIZE 100000
 
 typedef enum{
@@ -44,13 +44,14 @@ typedef struct {
 } CombinationBuffer;
 
 typedef struct {
-    Function *f1;
-    Function *f2;
-    char op; // '*' ou '+'
-} Task;
+    Function *f1[BATCH_SIZE];
+    Function *f2[BATCH_SIZE];
+    char op[BATCH_SIZE];
+    int count; // Quantos itens validos neste batch
+} TaskBatch;
 
 typedef struct {
-    Task tasks[QUEUE_SIZE];
+    TaskBatch batches[QUEUE_SIZE];
     int head;
     int tail;
     int count;
@@ -93,8 +94,8 @@ void printFunction(Function* node);
 //void fprintFunction(FILE *f, Function* node);
 //void logExpressionToFile(Function *node, int ordem);
 void initQueue(TaskQueue *q);
-void enqueue(TaskQueue *q, Function *f1, Function *f2, char op);
-bool dequeue(TaskQueue *q, Task *t);
+void enqueue(TaskQueue *q, TaskBatch *t);
+bool dequeue(TaskQueue *q, TaskBatch *t);
 
 int main(int argc, char *argv[])
 {
@@ -142,7 +143,6 @@ int main(int argc, char *argv[])
     Bucket *buckets = NULL;
     // Parseia a expressão de entrada e obtém o BDD resultante
     DdNode *objectiveExp = parseInputExpression(manager, argv[1], &varMap, &varCount, &literalCount);
-    printf("literalCount: %d\n", literalCount);
     
     if (objectiveExp == NULL)
     {
@@ -179,7 +179,6 @@ int main(int argc, char *argv[])
     initializeFirstBucket(manager, varMap, varCount, &buckets[0], objectiveExp, &found, uniqueCheck);
     if (!found) {
 
-    printf("--- Bucket 1 (Ordem %d, Tamanho %d) ---\n", buckets[0].order, buckets[0].size);
     printBucket(manager, buckets[0], varCount);
 
     // Inicializa todos os buckets que poderão ser usados nesta execução do programa
@@ -193,7 +192,6 @@ int main(int argc, char *argv[])
         //Dentro da função, quero que cada thread trate de combinar buckets diferentes
         found = createCombinedBucket(manager, buckets, numBuckets, order, objectiveExp, uniqueCheck, choice);
         if (found) break; // Sai do loop se encontrou a equivalência
-        printf("--- Bucket %d (Ordem %d, Tamanho %d) ---\n", order, buckets[order - 1].order, buckets[order - 1].size);
         //printBucket(manager, buckets[order - 1], varCount);
         
     }
@@ -252,21 +250,10 @@ Bucket *addBucket(Bucket *buckets, int *numBuckets)
 
 void printBucket(DdManager *manager, Bucket bucket, int varCount)
 {
-    printf("Bucket Order: %d | Size: %d\n", bucket.order, bucket.size);
-    if (bucket.functions != NULL)
-    {
-        for (int i = 0; i < bucket.size; i++)
-        {
-            printf("  Function[%d]:", i);
-            printFunction(bucket.functions[i]);
-            printf("\n");
-            //Cudd_PrintDebug(manager, bucket.functions[i], varCount, 2);
-        }
-    }
-    else
-    {
-        printf("  No functions in this bucket.\n");
-    }
+    (void)manager;
+    (void)varCount;
+    (void)bucket;
+    // Função mantida vazia para evitar prints de debug
 }
 
 void freeAllBuckets(DdManager *manager, Bucket *buckets, int numBuckets)
@@ -437,7 +424,7 @@ DdNode *parseInputExpression(DdManager *manager, const char *input, Function **o
                 local_var_map[var_count].right = NULL;
                 local_var_map[var_count].bdd = Cudd_bddIthVar(manager, var_count);
                 Cudd_Ref(local_var_map[var_count].bdd);
-                printf("Criada variável BDD %d para '%c'\n", var_count, c);
+                // debug print removed
                 var_count++;
             }
 
@@ -543,12 +530,12 @@ DdNode *initializeFirstBucket(DdManager *manager, Function *varMap, int varCount
             bucket->functions[actualSize] = varNode(varMap[i].varName, varMap[i].bdd);
             // Insere na tabela hash de verificação
             st_insert(uniqueCheck, (char *)bucket->functions[actualSize]->bdd, (char *)bucket->functions[actualSize]->bdd);
-            //logExpressionToFile(bucket->functions[actualSize], 1);
             //Verifica se é solução
             if (bucket->functions[actualSize]->bdd == objectiveExp) {
                 
                 printf("Solução Encontrada (Ordem 1): ");
                 printFunction(bucket->functions[actualSize]);
+                printf("\n");
                 *found = true;
             }
             actualSize++;
@@ -565,7 +552,6 @@ DdNode *initializeFirstBucket(DdManager *manager, Function *varMap, int varCount
             bucket->functions[actualSize] = opNode(NOT, varNodePtr, NULL, notBdd);
             // Insere na tabela hash de verificação
             st_insert(uniqueCheck, (char *)bucket->functions[actualSize]->bdd, (char *)bucket->functions[actualSize]->bdd);
-            //logExpressionToFile(bucket->functions[actualSize], 1);
             //Verifica se é solução
             if (bucket->functions[actualSize]->bdd == objectiveExp) 
             {
@@ -579,7 +565,6 @@ DdNode *initializeFirstBucket(DdManager *manager, Function *varMap, int varCount
     }
 
     bucket->size = actualSize;
-    printf("Primeiro bucket inicializado com %d funções.\n", actualSize);
     return NULL;
 }
 
@@ -636,239 +621,177 @@ bool createCombinedBucket(DdManager *manager, Bucket *buckets, int numBuckets, i
 
     bool stop = false;
 
-    TaskQueue queue;
-    initQueue(&queue);
+    TaskQueue *queue = (TaskQueue *)malloc(sizeof(TaskQueue));
+    initQueue(queue);
+
+    int active_workers;
 
     #pragma omp parallel
     {
+        #pragma omp single
+        active_workers = omp_get_num_threads() - 1;
+
         int tid = omp_get_thread_num();
         int numThreads = omp_get_num_threads();
-
-        bool hasWork = dequeue(&queue, &task);
-                
-                // Verifica condição de parada do loop do Manager
-                bool producers_done;
+        
+        if (tid == 0){
+            TaskBatch task;
+            while (true){
+                bool hasWork = dequeue(queue, &task);
+                int current_workers;
                 #pragma omp atomic read
-                producers_done = queue.finished;
+                current_workers = active_workers;
 
                 if (!hasWork) {
-                    if (producers_done && queue.count == 0) break; // Tudo processado
-                    continue; // Fila vazia mas produtores ativos, continua aguardando
+                    if (current_workers == 0 && queue->count == 0) break; // Tudo processado
+                    continue; // File vazia mas ainda tem produção
                 }
+                if (stop) continue; //Parada ativada, limpa a fila
 
-                if (stop) continue; // Se flag de parada global ativada, drena fila mas não processa
+                double t_svc_start = omp_get_wtime();
+
+                // Loop interno para processar o lote inteiro
+                for (int i = 0; i < task.count; i++) {
+                    if (stop) break; // Checa stop dentro do lote também
+
+                    Function *func1 = task.f1[i];
+                    Function *func2 = task.f2[i];
+                    char op = task.op[i];
+
+       
+                    DdNode *newBdd = combineBdds(manager, func1->bdd, func2->bdd, op);
+                if (newBdd != NULL && newBdd != Cudd_ReadLogicZero(manager) && newBdd != Cudd_ReadOne(manager)) {
+
+                    if (newBdd == objectiveExp && choice == 'e'){
+                        stop = true;
+                        #pragma omp flush(stop)
+                        printf("\n!!! EQUIVALÊNCIA ENCONTRADA (Ordem %d) !!!\n", targetOrder);
+                        printf("RESULTADO_LITERAIS: %d\n", targetOrder);
+                            
+                        Function tempNode;
+                        tempNode.operador = (task.op[i] == '*') ? AND : OR;
+                        tempNode.left = task.f1[i];
+                        tempNode.right = task.f2[i];
+                        tempNode.varName = '\0';
+
+                        printf("RESULTADO_EXPRESSAO: ");
+                        printFunction(&tempNode);
+                        printf("\n");
+                    }
+
+                    if (!stop) {
+                        if (st_insert(uniqueCheck, (char *)newBdd, (char *)newBdd) == 0) {
+                                Function *newFunction = opNode((task.op[i] == '*') ? AND : OR, task.f1[i], task.f2[i], newBdd);
+                                addFunctionToDynamicArray(newFunction, &newFunctions, &newFuncCount, &newFuncCapacity);
+                            } else {
+                                Cudd_RecursiveDeref(manager, newBdd);
+                            }
+                    } else {
+                        Cudd_RecursiveDeref(manager, newBdd);
+                    }
+                } else {
+                    if(newBdd) Cudd_RecursiveDeref(manager, newBdd);
+            }
+            double t_svc_end = omp_get_wtime();
+            #pragma omp atomic
+            global_service_time += (t_svc_end - t_svc_start);
+        }
     }
-    for (int i = 0; i < targetOrder-1; i++)
+    } else
     {
-        int order1 = buckets[i].order; 
-        int order2 = targetOrder - order1;
-        if (order2 < order1) break; // Evita repetições desnecessárias
-        int j = order2 - 1;
-        if (!(buckets[i].order > 0) && !(buckets[j].order > 0) && 
-                !(buckets[i].order + buckets[j].order == targetOrder)) continue;
+    //Aqui as outras threads, que só fazem as combinações e enfileiram
+    TaskBatch localBatch;
+    localBatch.count = 0;    
+    for (int i = 0; i < targetOrder-1; i++)
+        {
+            #pragma omp flush(stop)
+            if (stop) break; // Sai do loop se a flag de parada foi ativada na iteração passada
+
+    
+            int order1 = buckets[i].order; 
+            int order2 = targetOrder - order1;
+            if (order2 < order1) break; // Evita repetições desnecessárias
+            int j = order2 - 1;
+
                 Bucket *b1 = &buckets[i];
                 Bucket *b2 = &buckets[j];
-                printf("Combinando buckets de ordem %d e %d para formar ordem %d\n", b1->order, b2->order, targetOrder);
-
-                 #pragma omp flush(stop)
-                if (stop) break; // Sai do loop se a flag de parada foi ativada na iteração passada
 
                 if (b1->size == 0 || b2->size == 0) continue;
 
-                // Calcula a carga de trabalho estimada
-                //long long por que o valor cresce de forma explosiva
-                long long total_iterations = (long long)b1->size * (long long)b2->size;
-                // Parallel inicia o paralelismo, for define o loop a ser paralelizado
-                // collapse(2) combina os loops aninhados, schedule(dynamid) distribui a carga dinamicamente
-                //if() define que só paralelize trabalho que compense o overhead (Valor estimado com base em testes)
-                #pragma omp parallel if(total_iterations > PARALLEL_MIN_COMBINATIONS)
-                {
-                    // Para calcular o tempo gasto em travas
-                    double local_total_time = 0.0;
-                    double local_service_time = 0.0;
-                    //Vou aplicar batching pra diminuir o overhead de criação de threads e mudança de contexto
-                    CombinationBuffer buffer[BATCH_SIZE];
-                    int buffer_count = 0;
+                //Distribui manualmente o loop
+
+                int worker_count = numThreads - 1;
+                int my_id = tid - 1;
                 
-                #pragma omp for collapse(2) schedule(dynamic) nowait
-                for (int k = 0; k < b1->size; k++)
+                for (int k = my_id; k < b1->size; k+= worker_count)
                 {
+                     // Verifica se a flag de parada foi ativada
+                    #pragma omp flush(stop)
+                    if (stop) continue;
+
                     for (int l = 0; l < b2->size; l++)
                     {
-                        // Verifica se a flag de parada foi ativada
-                        #pragma omp flush(stop)
-                        if (stop) continue;
-
                         if (i == j && l < k) continue; // Evita repetições desnecessárias em buckets iguais
 
-                        Function *f1 = b1->functions[k];
-                        Function *f2 = b2->functions[l];
+                        //Function *f1 = b1->functions[k];
+                        //Function *f2 = b2->functions[l];
                         
-                        for (int op = 0; op < 2; op++)
-                        {
-                            if (stop) continue; //Só pra garantir
-
-                            DdNode *newBdd = NULL;
-                            char opChar = (op == 0) ? '*' : '+';
-                            
-                            // Medir o tempo gasto dentro do critical, apenas para combinar bdds
-                           double t_out_start = omp_get_wtime();
-                            //Crítico pois precisa acessar o manager, que é compartilhado
-                           
-                            #pragma omp critical(bdd_access)
-                            {
-                                double t_in_start = omp_get_wtime();
-                                if(!stop)
-                                newBdd = combineBdds(manager, f1->bdd, f2->bdd, opChar);
-                                double t_in_end = omp_get_wtime();
-                                local_service_time += (t_in_end - t_in_start);
-                            }
-
-                            double t_out_end = omp_get_wtime();
-                            local_total_time += (t_out_end - t_out_start);
-
-                            if (newBdd == NULL) continue; //Caso tenha parado dentro do critical
-                            
-
-                            if (newBdd == Cudd_ReadLogicZero(manager) || newBdd == Cudd_ReadOne(manager)) {
-                             #pragma omp critical(bdd_access)
-                             Cudd_RecursiveDeref(manager, newBdd);
-                             continue;
-                            }
-
-
-                            //Parada imediata caso encontre equivalência
-                            if (newBdd == objectiveExp && choice == 'e')
-                            {
-                                #pragma omp critical(success_report)
-                                {
-                                    if(!stop) 
-                                    {
-                                        stop = true; // Ativa a flag de parada
-                                    
-                                        printf("\n!!! EQUIVALÊNCIA ENCONTRADA (Ordem %d) !!!\n", targetOrder);
-
-                                        // Prefixo para facilitar o grep no script
-                                        printf("RESULTADO_LITERAIS: %d\n", targetOrder);
-                                
-                                        Function tempNode;
-                                        tempNode.operador = (opChar == '*') ? AND : OR;
-                                        tempNode.left = f1;
-                                        tempNode.right = f2;
-                                        tempNode.varName = '\0';
-                                        
-
-                                        printf("RESULTADO_EXPRESSAO: ");
-                                        printFunction(&tempNode); 
-                                        printf("\n"); // Nova linha obrigatória após a expressão recursiva
-                                
-                                    }
-                                }
-
-                                #pragma omp critical(bdd_access)
-                                {
-                                    Cudd_RecursiveDeref(manager, newBdd);
-                                }
-                                continue;
-                            }
-
-
-                            buffer[buffer_count].f1 = f1;
-                            buffer[buffer_count].f2 = f2;
-                            buffer[buffer_count].bdd = newBdd;
-                            buffer[buffer_count].op = opChar;
-                            buffer_count++;
-
-                            if (buffer_count == BATCH_SIZE)
-                            {
-                                #pragma omp critical(bdd_access)
-                                {
-                                    for (int b = 0; b<buffer_count; b++)
-                                    {
-                                        #pragma omp flush(stop)
-                                        if(stop){
-                                            Cudd_RecursiveDeref(manager, buffer[b].bdd);
-                                            continue;
-                                        }
-                                    if (st_insert(uniqueCheck, (char *)buffer[b].bdd, (char *)buffer[b].bdd) == 0) {
-                                        
-                                        Function *newFunction = opNode((buffer[b].op == '*') ? AND : OR, buffer[b].f1, buffer[b].f2, buffer[b].bdd);
-                                
-                                        addFunctionToDynamicArray(newFunction, &newFunctions, &newFuncCount, &newFuncCapacity);
-                                    } else {
-
-                                        Cudd_RecursiveDeref(manager, buffer[b].bdd);
-                                    }
-                                }
-                            }
-                            buffer_count = 0; // Reseta o buffer
+                        // Enfileira as duas operações
+                        int idx = localBatch.count;
+                        localBatch.f1[idx] = b1->functions[k];
+                        localBatch.f2[idx] = b2->functions[l];
+                        localBatch.op[idx] = '*'; // Primeiro AND
+                        localBatch.count++;
+                        
+                        if (localBatch.count == BATCH_SIZE) {
+                            enqueue(queue, &localBatch);
+                            localBatch.count = 0;
                         }
+                        idx = localBatch.count;
+                localBatch.f1[idx] = b1->functions[k];
+                localBatch.f2[idx] = b2->functions[l];
+                localBatch.op[idx] = '+'; 
+                localBatch.count++;
+                
+                if (localBatch.count == BATCH_SIZE) {
+                    enqueue(queue, &localBatch);
+                    localBatch.count = 0;
+                }
                     }
                 }
-            } // Fim do loop for
-            if (buffer_count > 0) {
-                #pragma omp critical(bdd_access)
-                {
-                    for (int b = 0; b < buffer_count; b++) {
-                        if(stop) {
-                             Cudd_RecursiveDeref(manager, buffer[b].bdd);
-                             continue;
-                        }
-                        if (st_insert(uniqueCheck, (char *)buffer[b].bdd, (char *)buffer[b].bdd) == 0) {
-                            Function *newFunction = opNode((buffer[b].op == '*') ? AND : OR, buffer[b].f1, buffer[b].f2, buffer[b].bdd);
-                            addFunctionToDynamicArray(newFunction, &newFunctions, &newFuncCount, &newFuncCapacity);
-                        } else {
-                            Cudd_RecursiveDeref(manager, buffer[b].bdd);
-                        }
-                    }
-                }
-                buffer_count = 0;
             }
-            #pragma omp atomic
-            global_total_time += local_total_time;
+
+            if (localBatch.count > 0) {
+            enqueue(queue, &localBatch);
+            }
 
             #pragma omp atomic
-            global_service_time += local_service_time;
-        } // Fim do parallel region
-
+            active_workers--;
+        }
+    } // Fim do parallel region
+    
+    omp_destroy_lock(&queue->lock);
+    free(queue);
+    if (stop) {
+        // Libera todas as funções criadas
+        for (int i = 0; i < newFuncCount; i++) {
+            Cudd_RecursiveDeref(manager, newFunctions[i]->bdd);
+            free(newFunctions[i]);
+        }
+        free(newFunctions);
+        return true; // Equivalência encontrada
     }
-
-
-            if(stop){
-                //Limpar o que foi alocado
-                for(int i=0; i<newFuncCount; i++) {
-                    Cudd_RecursiveDeref(manager, newFunctions[i]->bdd);
-                    free(newFunctions[i]);
-                }
-                free(newFunctions);
-                return true;    
-            }
-
 
     targetBucket->order = targetOrder;
     targetBucket->size = newFuncCount;
-
     if (newFuncCount > 0) {
-        // Não sei se precisa, mas economiza um pouco de memória
         targetBucket->functions = newFunctions;
-    } else {
+    } else
+    {
         free(newFunctions);
         targetBucket->functions = NULL;
     }
-    //printBucket(manager, *targetBucket, 0);
-    // Verifica array final se a opção não era saída imediata
-    for (int i = 0; i < newFuncCount; i++) {
-        if (newFunctions[i]->bdd == objectiveExp) {
-            printf("\n!!! EQUIVALÊNCIA ENCONTRADA (Ordem %d) !!!\n", targetOrder);
-            printFunction(newFunctions[i]);
-            printf("\n");
-            printf("No de literais: %d\n", targetOrder);
-            return true;
-        }
-    }
-
-
-    return false;
+    return false;        
 }
 
 Function* varNode(char varName, DdNode *bdd) {
@@ -969,14 +892,12 @@ void initQueue(TaskQueue *q) {
     omp_init_lock(&q->lock);
 }
 
-void enqueue(TaskQueue *q, Function *f1, Function *f2, char op) {
+void enqueue(TaskQueue *q, TaskBatch *t) {
     // Spinlock simples se a fila estiver cheia para não bloquear indefinidamente
     while (1) {
         omp_set_lock(&q->lock);
         if (q->count < QUEUE_SIZE) {
-            q->tasks[q->tail].f1 = f1;
-            q->tasks[q->tail].f2 = f2;
-            q->tasks[q->tail].op = op;
+           q->batches[q->tail] = *t; 
             q->tail = (q->tail + 1) % QUEUE_SIZE;
             q->count++;
             omp_unset_lock(&q->lock);
@@ -984,15 +905,16 @@ void enqueue(TaskQueue *q, Function *f1, Function *f2, char op) {
         }
         omp_unset_lock(&q->lock);
         // Pequena pausa para dar chance ao consumidor
+        
         #pragma omp flush
     }
 }
 
-bool dequeue(TaskQueue *q, Task *t) {
+bool dequeue(TaskQueue *q, TaskBatch *t) {
     bool hasItem = false;
     omp_set_lock(&q->lock);
     if (q->count > 0) {
-        *t = q->tasks[q->head];
+        *t = q->batches[q->head];
         q->head = (q->head + 1) % QUEUE_SIZE;
         q->count--;
         hasItem = true;
